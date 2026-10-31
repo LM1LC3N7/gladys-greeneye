@@ -121,3 +121,16 @@ up to date at the end of every milestone.
     the first GEM heard again.
   - The reviewer's scenarios s2b/s2c/s2d (written against r1) expect a hold
     on a wrap; the fix unwraps instead, as the review asked.
+- **Review r2 fixes** (2026-10-31):
+  - A wrap is taken only when the GEM ran on: no restart seen (seconds back
+    in a new connection) and the seconds it counted since the last packet of
+    the serial (`gem` in /data with its session date) match the session time
+    elapsed (2 min or 5 %). The margin of the wrap counts over those GEM
+    seconds. A reset near the top is a drop, held (scenarios s9a-s9c); a true
+    wrap during a long absence is counted (s9d).
+  - The session of the last packet is forgotten when the channel goes up or
+    down (the link numbers its sessions from 1 at each start).
+  - /data keeps `serials` as a list, oldest first (the eviction drops the
+    oldest after a restart too).
+  - Tests for the surviving mutants: stale `.tmp`, serial changed during the
+    Gladys read, one counters check at a time, serial retyped, 8 serials.

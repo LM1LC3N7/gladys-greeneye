@@ -126,8 +126,11 @@ counts every rise in full. So:
   pulse counter), plus a small slack;
 - the energy counters of the GEM wrap around at 2^40 watt-seconds (305,420
   kWh) and the pulse counters at 2^24 pulses: a wrap (a counter near its top
-  that starts again near 0, the step through the top within the margin above)
-  is counted on, the offset kept in `/data` (a wrap while `/data` could not
+  that starts again near 0 while the GEM ran on: its own seconds counter went
+  on with the time elapsed, and the step through the top fits the margin
+  above over those seconds) is counted on; a GEM that restarted (its seconds
+  went back or do not match the time elapsed) never wraps: its drop is held;
+  the offset is kept in `/data` (a wrap while `/data` could not
   keep the previous value shows as a drop, held);
 - a **drop** (a GEM reset, a replaced CT) or a
   **jump** is **held back**: the last accepted value is sent again, nothing

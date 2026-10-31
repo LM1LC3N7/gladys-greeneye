@@ -70,6 +70,8 @@ export const TIMINGS = Object.freeze({
   valueMaxAge: MINUTE,
   /** The counters (indexes, pulses) are checked and published once a minute at most. */
   indexInterval: MINUTE,
+  /** The seconds counted by the GEM may differ this much (or 5 %) from the session clock. */
+  gemClockTolerance: 2 * MINUTE,
   /** "The GEM restarted" stays in the status this long. */
   restartNotice: 10 * MINUTE,
   /** The power is computed over two packets at most this far apart (GEM seconds). */

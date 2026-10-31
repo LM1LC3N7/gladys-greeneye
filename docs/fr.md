@@ -131,9 +131,12 @@ consommation : il compte chaque hausse en entier. Donc :
   pour un compteur d’impulsions), plus une petite marge ;
 - les compteurs d’énergie du GEM repartent à zéro à 2^40 wattsecondes
   (305 420 kWh) et les compteurs d’impulsions à 2^24 impulsions : ce
-  débordement (un compteur proche de son maximum qui repart près de 0, le pas
-  à travers le maximum tenant dans la marge ci-dessus) est compté à la suite,
-  le décalage gardé dans `/data` (un débordement survenu alors que `/data` n’a
+  débordement (un compteur proche de son maximum qui repart près de 0 alors que
+  le GEM a tourné sans interruption : son propre compteur de secondes a suivi
+  le temps écoulé, et le pas à travers le maximum tient dans la marge
+  ci-dessus sur ces secondes) est compté à la suite ; un GEM qui a redémarré
+  (ses secondes ont reculé ou ne suivent pas le temps écoulé) ne déborde
+  jamais : sa baisse est retenue ; le décalage est gardé dans `/data` (un débordement survenu alors que `/data` n’a
   pas pu garder la valeur précédente apparaît comme une baisse, retenue) ;
 - une **baisse** (remise à zéro du GEM, pince remplacée) ou un **saut** est **retenu** : la dernière valeur acceptée est
   renvoyée, rien n’est compté, l’état liste le compteur avec la valeur

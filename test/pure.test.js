@@ -274,8 +274,16 @@ test('/data read back: bounded, known keys only, future dates now, per serial', 
       serial: 1100603,
       typed: true,
       format: 'BIN48-NET',
-      serials: {
-        1100603: {
+      serials: [
+        { serial: 99_999_999, seen: { channels: [1] } },
+        'abc',
+        {
+          serial: 2_200_001,
+          gem: { seconds: 2 ** 24, at: 5 },
+        },
+        {
+          serial: 1100603,
+          gem: { seconds: 77, at: 9e15 },
           seen: {
             channels: [1, 2, 99, 'x'],
             temps: [8, 9],
@@ -300,14 +308,14 @@ test('/data read back: bounded, known keys only, future dates now, per serial', 
             'abs-2': { raw: 1.5, offset: 0, at: 1 },
           },
         },
-        99999999: { seen: { channels: [1] } },
-        abc: {},
-      },
+      ],
     },
     1000,
   );
   assert.equal(memory.typed, true);
-  assert.deepEqual([...memory.serials.keys()], [1100603]);
+  assert.deepEqual([...memory.serials.keys()], [2_200_001, 1100603], 'the order of the list kept');
+  assert.equal(memory.serials.get(2_200_001).gem, undefined, 'seconds out of range');
+  assert.deepEqual(memory.serials.get(1100603).gem, { seconds: 77, at: 1000 });
   const unit = memory.serials.get(1100603);
   assert.deepEqual([...unit.seen.channels], [1, 2]);
   assert.deepEqual([...unit.seen.temps], [8]);
@@ -316,11 +324,17 @@ test('/data read back: bounded, known keys only, future dates now, per serial', 
   assert.equal(unit.guards['ch2-prod'].held.to, 9);
   assert.equal(unit.guards['ch2-prod'].held.at, 1000, 'a hold dated in the future is now');
   assert.deepEqual(Object.keys(unit.wraps), ['abs-1']);
-  assert.deepEqual(unit.wraps['abs-1'], { raw: 5, offset: 2 ** 40, at: 1000 });
+  assert.deepEqual(unit.wraps['abs-1'], { raw: 5, offset: 2 ** 40 });
   const round = normalizeMemory(JSON.parse(JSON.stringify(serializeMemory(memory))), 1000);
   assert.deepEqual(serializeMemory(round), serializeMemory(memory));
   assert.equal(normalizeMemory({ serial: 99_999_999 }, 1).serial, undefined);
   assert.equal(normalizeMemory({ serial: 5, typed: 'yes' }, 1).typed, false);
+  const twice = normalizeMemory({ serials: [{ serial: 11 }, { serial: 22 }, { serial: 11 }] }, 1);
+  assert.deepEqual(
+    [...twice.serials.keys()],
+    [22, 11],
+    'a serial listed twice is as recent as its last place',
+  );
 });
 
 test('the file store: missing is empty, a FIFO and a directory refused without waiting, too large refused', async (t) => {
@@ -369,4 +383,15 @@ test('the guard: an accepted drop is a floor until a value is taken', () => {
   assert.equal(g.accept(5, H + 1000), false, 'under the floor accepted');
   assert.equal(g.held.direction, 'down');
   assert.equal(g.accept(10.1, H + 2000), true);
+});
+
+test('the file store: a temporary file left by a crash never blocks the next saves', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'greeneye-tmp-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const path = join(dir, 'state.json');
+  await writeFile(`${path}.tmp`, 'half a write');
+  const store = fileStore(path);
+  await store.save({ a: 1 });
+  await store.save({ a: 2 });
+  assert.deepEqual(await store.load(), { a: 2 });
 });

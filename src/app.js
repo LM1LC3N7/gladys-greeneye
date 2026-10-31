@@ -38,7 +38,7 @@ import { createHash } from 'node:crypto';
 import { createLogger } from '@gladysassistant/integration-sdk';
 import { ChannelClient } from './channel.js';
 import { linkEnv, normalizeConfig } from './config.js';
-import { BOUNDS, GUARDS, HOUR, LIMITS, LINK, TIMINGS } from './constants.js';
+import { BOUNDS, GUARDS, LIMITS, LINK, TIMINGS } from './constants.js';
 import { PacketError, WRAP, parsePacket } from './gem/packets.js';
 import { CounterGuard } from './guard.js';
 import { ACCEPT, STATUS } from './i18n.js';
@@ -623,6 +623,8 @@ export class GreenEyeApp {
     this.channelDownSince = this.clock();
     channel.on('up', (info) => {
       if (generation !== this.generation) return;
+      // The link may have restarted: its session ids start again (review r2, m1).
+      if (this.previous) this.previous.session = undefined;
       this.channelDownSince = undefined;
       this.logger.info('Connected to the GEM link');
       const current = info?.session;
@@ -719,6 +721,7 @@ export class GreenEyeApp {
     if (!this.checkIdentity(packet)) return;
     const previous = this.previous?.packet;
     let seconds;
+    let restarted = false;
     if (previous) {
       const back = previous.seconds - packet.seconds;
       if (back === 0) return; // the same packet again
@@ -731,6 +734,7 @@ export class GreenEyeApp {
       if (back > 0 && back <= TIMINGS.staleSeconds) {
         // Back in a new connection: the GEM restarted (its counter starts again).
         this.restartedAt = mono;
+        restarted = true;
         this.logger.info('The GEM restarted (its seconds counter went back)');
         seconds = undefined;
       } else {
@@ -741,8 +745,8 @@ export class GreenEyeApp {
     }
     if (seconds !== undefined) this.interval = seconds * 1000;
     this.previous = { packet, mono, session: this.session.id };
-    // The 5-byte and 3-byte counters, unwrapped (review r1, I1).
-    const counters = this.unwrap(packet, this.sessionNow());
+    // The 5-byte and 3-byte counters, unwrapped (reviews r1 and r2, I1).
+    const counters = this.unwrap(packet, this.gemStep(packet, this.sessionNow(), restarted));
     const firstPacket = this.lastPacketMono === undefined;
     this.lastPacketMono = mono;
     let changed = false;
@@ -906,26 +910,46 @@ export class GreenEyeApp {
   }
 
   /**
-   * The raw counters of a packet unwrapped, on the session clock `at`: the
-   * absolute and polarized energies (5 bytes, 2^40 Ws) and the pulses (3
-   * bytes, 2^24). A raw value that goes back by more than half of its range
-   * while the forward step through the top fits the margin of the counter
-   * since its last value is a wrap: the counter's offset grows by the range
-   * (kept in /data). Any other step back (a reset, a replaced CT) stays a
-   * drop, for the guard to hold.
+   * The seconds the GEM counted since the last packet of the serial followed
+   * (kept in /data with the session date it came), or undefined when the GEM
+   * did not run on continuously: it restarted (its seconds went back in a new
+   * connection), or the seconds it counted do not match the time elapsed on
+   * the session clock (a reset while nobody listened: its seconds started
+   * again from 0). Tolerance: 2 minutes or 5 %.
    */
-  unwrap(packet, at) {
+  gemStep(packet, at, restarted) {
+    const unit = this.unit();
+    const before = unit.gem;
+    unit.gem = { seconds: packet.seconds, at };
+    if (!before || restarted) return undefined;
+    const counted = delta(packet.seconds, before.seconds, WRAP.seconds);
+    const elapsed = Math.max(0, at - before.at) / 1000;
+    const tolerance = Math.max(TIMINGS.gemClockTolerance / 1000, elapsed * 0.05);
+    return Math.abs(counted - elapsed) <= tolerance ? counted : undefined;
+  }
+
+  /**
+   * The raw counters of a packet unwrapped: the absolute and polarized
+   * energies (5 bytes, 2^40 Ws) and the pulses (3 bytes, 2^24). A raw value
+   * that goes back by more than half of its range is a wrap only when the
+   * GEM ran on continuously (`step`: the seconds it counted since the last
+   * packet, see gemStep) and the forward step through the top fits the
+   * margin of the counter over those seconds: then the counter's offset
+   * grows by the range (kept in /data). Any other step back (a reset of the
+   * GEM, a replaced CT) stays a drop, for the guard to hold.
+   */
+  unwrap(packet, step) {
     const wraps = this.unit().wraps;
     let changed = false;
     const one = (key, raw, range, perHour, slack) => {
       const entry = Object.hasOwn(wraps, key) ? wraps[key] : undefined;
       if (!entry) {
-        wraps[key] = { raw, offset: 0, at };
+        wraps[key] = { raw, offset: 0 };
         return raw;
       }
-      if (raw < entry.raw && entry.raw - raw > range / 2) {
+      if (raw < entry.raw && entry.raw - raw > range / 2 && step !== undefined) {
         const forward = raw + range - entry.raw;
-        const margin = (perHour * Math.max(0, at - entry.at)) / HOUR + slack;
+        const margin = (perHour * step) / 3600 + slack;
         if (forward <= margin) {
           entry.offset += range;
           changed = true;
@@ -933,7 +957,6 @@ export class GreenEyeApp {
         }
       }
       entry.raw = raw;
-      entry.at = at;
       return raw + entry.offset;
     };
     const ws = [GUARDS.energy.perHour * WS_PER_KWH, GUARDS.energy.slack * WS_PER_KWH];

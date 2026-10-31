@@ -29,6 +29,9 @@ the notes of the version's GitHub Release.
 - What is seen and held is kept per serial number: a serial mistyped then
   corrected keeps every hold; a guard without /data is built on a fresh read
   of Gladys.
+- A wrap is counted only when the GEM ran on (its own seconds match the
+  time elapsed): a reset of the GEM near the top of a counter is a drop,
+  held.
 - A restart of the GEM in a new connection is taken (and said), a hanging
   /data write is said, an unreadable /data pins no serial, a cleared serial
   field follows the first GEM heard again.
