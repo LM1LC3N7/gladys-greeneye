@@ -1,177 +1,237 @@
 {
   "manifest_version": 1,
   "type": "device",
-  "name": "Demo Devices Template",
+  "name": "GreenEye Monitor",
   "description": {
-    "en": "Starter template showing sensors, a switch, a dimmable light and a smart plug.",
-    "fr": "Template de démarrage : capteurs, interrupteur, lampe variable et prise connectée."
+    "en": "Brultech GreenEye Monitor: energy and power per channel, pulses, temperatures, locally.",
+    "fr": "Brultech GreenEye Monitor : énergie et puissance par canal, impulsions, températures, en local."
   },
-  "version": "1.0.0",
-  "docker_image": "ghcr.io/gladysassistant/integration-template-js:1.0.0",
+  "version": "0.1.0",
+  "docker_image": "ghcr.io/lm1lc3n7/gladys-greeneye:0.1.0",
   "gladys_version": ">=5.1.0",
-  "cover_image": "https://raw.githubusercontent.com/GladysAssistant/integration-template-js/master/cover.png",
-  "categories": ["lighting", "security", "environment"],
-  "transports": ["local", "cloud"],
+  "cover_image": "https://raw.githubusercontent.com/LM1LC3N7/gladys-greeneye/main/cover.png",
+  "categories": ["energy"],
+  "transports": ["local"],
+  "containers": [
+    {
+      "name": "gem-link",
+      "docker_image": "ghcr.io/lm1lc3n7/gladys-greeneye:0.1.0",
+      "command": ["node", "src/receiver.js"],
+      "start": "manual",
+      "read_only": true,
+      "memory_mb": 64,
+      "cpu": 0.1,
+      "ports": [
+        {
+          "container_port": 8000,
+          "protocol": "tcp",
+          "name": "gem",
+          "label": {
+            "en": "GreenEye Monitor packets (TCP)",
+            "fr": "Paquets du GreenEye Monitor (TCP)"
+          },
+          "browsable": false
+        }
+      ]
+    }
+  ],
   "config_schema": [
     {
       "key": "intro",
       "type": "section",
-      "label": { "en": "Getting started", "fr": "Pour commencer" },
+      "label": {
+        "en": "Your Brultech GreenEye Monitor",
+        "fr": "Votre Brultech GreenEye Monitor"
+      },
       "description": {
-        "en": "The demo weather station reads real data from the free Open-Meteo API: pick the coordinates to observe. No account, no API key.",
-        "fr": "La station météo de démonstration lit de vraies données via l'API gratuite Open-Meteo : choisissez les coordonnées à observer. Pas de compte, pas de clé d'API."
+        "en": "Energy (index), power and current of each channel, the voltage, the pulse counters and the temperatures a GreenEye Monitor (GEM) sends, on your local network, without any cloud. The GEM sends its packets to Gladys by itself; nothing is ever sent to it. Give it a fixed IP address in your router. Never tested with a real GEM. Unofficial integration, not affiliated with Brultech.",
+        "fr": "Énergie (index), puissance et courant de chaque canal, la tension, les compteurs d’impulsions et les températures qu’un GreenEye Monitor (GEM) envoie, sur votre réseau local, sans cloud. Le GEM envoie lui-même ses paquets à Gladys ; rien ne lui est jamais envoyé. Donnez-lui une adresse IP fixe dans votre box. Jamais testé avec un vrai GEM. Intégration non officielle, sans lien avec Brultech."
       },
       "links": [
         {
-          "url": "https://open-meteo.com/en/docs",
-          "label": { "en": "Open-Meteo documentation", "fr": "Documentation Open-Meteo" }
+          "url": "https://github.com/LM1LC3N7/gladys-greeneye/blob/main/docs/fr.md",
+          "label": {
+            "en": "Guide (French)",
+            "fr": "Guide (français)"
+          }
+        },
+        {
+          "url": "https://github.com/LM1LC3N7/gladys-greeneye/blob/main/docs/en.md",
+          "label": {
+            "en": "Guide (English)",
+            "fr": "Guide (anglais)"
+          }
         }
       ]
     },
     {
-      "key": "latitude",
-      "type": "number",
-      "label": { "en": "Latitude", "fr": "Latitude" },
-      "description": {
-        "en": "Latitude used for the demo weather sensor.",
-        "fr": "Latitude utilisée par le capteur météo de démonstration."
+      "key": "gem_address",
+      "type": "string",
+      "label": {
+        "en": "Address of the GEM",
+        "fr": "Adresse du GEM"
       },
-      "placeholder": { "en": "e.g. 48.8566", "fr": "ex. 48.8566" },
+      "description": {
+        "en": "The IP address of the GreenEye Monitor (the one of its web page), without a port. Nothing listens before it is saved.",
+        "fr": "L’adresse IP du GreenEye Monitor (celle de sa page web), sans port. Rien n’écoute avant son enregistrement."
+      },
+      "placeholder": {
+        "en": "192.168.1.70",
+        "fr": "192.168.1.70"
+      },
       "required": true,
-      "default": 48.8566,
-      "min": -90,
-      "max": 90
+      "default": ""
     },
     {
-      "key": "longitude",
-      "type": "number",
-      "label": { "en": "Longitude", "fr": "Longitude" },
-      "description": {
-        "en": "Longitude used for the demo weather sensor.",
-        "fr": "Longitude utilisée par le capteur météo de démonstration."
+      "key": "connection_section",
+      "type": "section",
+      "label": {
+        "en": "How the GEM reaches Gladys",
+        "fr": "Comment le GEM joint Gladys"
       },
-      "placeholder": { "en": "e.g. 2.3522", "fr": "ex. 2.3522" },
-      "required": true,
-      "default": 2.3522,
-      "min": -180,
-      "max": 180
+      "description": {
+        "en": "The GEM opens the connection itself. In its web page, under the packet sending settings (\"Packet Send\", TCP client), set the server address to the IP address of the Gladys machine on your network and the port to {{port:gem}} (chosen by Gladys), and a binary packet format: BIN48-NET or BIN32-NET (NET is needed for solar channels), BIN48-NET-TIME, BIN48-ABS or BIN32-ABS. The port exists once the address of the GEM is saved: save, then reload this screen. Allow this port in the firewall of the Gladys machine if it has one.",
+        "fr": "C’est le GEM qui ouvre la connexion. Dans sa page web, dans les réglages d’envoi des paquets (« Packet Send », client TCP), indiquez comme adresse du serveur l’adresse IP de la machine Gladys sur votre réseau et comme port {{port:gem}} (choisi par Gladys), et un format de paquet binaire : BIN48-NET ou BIN32-NET (NET est nécessaire pour les canaux solaires), BIN48-NET-TIME, BIN48-ABS ou BIN32-ABS. Le port existe une fois l’adresse du GEM enregistrée : enregistrez, puis rechargez cet écran. Autorisez ce port dans le pare-feu de la machine Gladys s’il y en a un."
+      }
     },
     {
-      "key": "unit",
-      "type": "select",
-      "label": { "en": "Temperature unit", "fr": "Unité de température" },
+      "key": "check_source",
+      "type": "boolean",
+      "label": {
+        "en": "Check the sender",
+        "fr": "Vérifier l’expéditeur"
+      },
+      "description": {
+        "en": "Accept the connection only from the address of the GEM. Turn it off only if the status says connections come from another address because Docker hides the real one on this machine: then any machine of your network can send false values in the name of the GEM (its serial number is still checked).",
+        "fr": "N’accepter la connexion que depuis l’adresse du GEM. À désactiver seulement si l’état dit que les connexions viennent d’une autre adresse parce que Docker masque la vraie sur cette machine : toute machine de votre réseau peut alors envoyer de fausses valeurs au nom du GEM (son numéro de série reste vérifié)."
+      },
       "required": false,
-      "default": "celsius",
+      "default": true
+    },
+    {
+      "key": "gem_serial",
+      "type": "string",
+      "label": {
+        "en": "Serial number of the GEM",
+        "fr": "Numéro de série du GEM"
+      },
+      "description": {
+        "en": "Optional: the 8 digits the GEM shows. Empty: the first GEM heard is followed. Packets of another serial number are refused; type the new one after replacing the monitor (it gets its own devices).",
+        "fr": "Facultatif : le numéro à 8 positions affiché par le GEM. Vide : le premier GEM entendu est suivi. Les paquets d’un autre numéro de série sont refusés ; saisissez le nouveau après un remplacement du moniteur (il a ses propres appareils)."
+      },
+      "placeholder": {
+        "en": "01000123",
+        "fr": "01000123"
+      },
+      "required": false,
+      "default": ""
+    },
+    {
+      "key": "energy_section",
+      "type": "section",
+      "label": {
+        "en": "Channels, counters and temperatures",
+        "fr": "Canaux, compteurs et températures"
+      },
+      "description": {
+        "en": "Each channel is a device with its energy index (kWh, for the energy monitoring of Gladys), its power and its current. A lifelong counter (energy, production, pulses) is never published at 0: a jump or a drop is held back, shown in the status and taken only after two clicks on \"Accept the held counters\". The pulse counters are published as raw pulse counts.",
+        "fr": "Chaque canal est un appareil avec son index d’énergie (kWh, pour le suivi énergétique de Gladys), sa puissance et son courant. Un compteur à vie (énergie, production, impulsions) n’est jamais publié à 0 : un saut ou une baisse est retenu, affiché dans l’état et pris seulement après deux clics sur « Accepter les compteurs retenus ». Les compteurs d’impulsions sont publiés en nombre brut d’impulsions."
+      }
+    },
+    {
+      "key": "channels",
+      "type": "string",
+      "label": {
+        "en": "Channels to show",
+        "fr": "Canaux à afficher"
+      },
+      "description": {
+        "en": "Optional, like \"1-12, 15\". Empty: a channel appears once it measured energy.",
+        "fr": "Facultatif, comme « 1-12, 15 ». Vide : un canal apparaît dès qu’il a mesuré de l’énergie."
+      },
+      "placeholder": {
+        "en": "1-12, 15",
+        "fr": "1-12, 15"
+      },
+      "required": false,
+      "default": ""
+    },
+    {
+      "key": "temperature_unit",
+      "type": "select",
+      "label": {
+        "en": "Temperature unit set on the GEM",
+        "fr": "Unité de température réglée sur le GEM"
+      },
+      "description": {
+        "en": "The packets do not say it: choose the one of the GEM. °F values are converted exactly to °C. Off: no temperature is published.",
+        "fr": "Les paquets ne la disent pas : choisissez celle du GEM. Les valeurs en °F sont converties exactement en °C. Désactivé : aucune température n’est publiée."
+      },
+      "required": false,
+      "default": "off",
       "options": [
-        { "value": "celsius", "label": { "en": "Celsius", "fr": "Celsius" } },
-        { "value": "fahrenheit", "label": { "en": "Fahrenheit", "fr": "Fahrenheit" } }
+        {
+          "value": "off",
+          "label": {
+            "en": "Off (no temperature)",
+            "fr": "Désactivé (aucune température)"
+          }
+        },
+        {
+          "value": "celsius",
+          "label": {
+            "en": "Celsius (°C)",
+            "fr": "Celsius (°C)"
+          }
+        },
+        {
+          "value": "fahrenheit",
+          "label": {
+            "en": "Fahrenheit (°F)",
+            "fr": "Fahrenheit (°F)"
+          }
+        }
       ]
     },
     {
-      "key": "poll_frequency",
-      "type": "number",
-      "label": { "en": "Refresh interval (s)", "fr": "Intervalle de rafraîchissement (s)" },
-      "description": {
-        "en": "How often sensors are polled, in seconds (one minute minimum).",
-        "fr": "Fréquence d'interrogation des capteurs, en secondes (une minute minimum)."
+      "key": "language",
+      "type": "select",
+      "label": {
+        "en": "Language of the names",
+        "fr": "Langue des noms"
       },
       "required": false,
-      "default": 300,
-      "min": 60,
-      "max": 3600
+      "default": "fr",
+      "options": [
+        {
+          "value": "fr",
+          "label": {
+            "en": "French",
+            "fr": "Français"
+          }
+        },
+        {
+          "value": "en",
+          "label": {
+            "en": "English",
+            "fr": "Anglais"
+          }
+        }
+      ]
     }
   ],
   "actions": [
     {
-      "key": "test_weather",
-      "label": { "en": "Test the weather provider", "fr": "Tester le fournisseur météo" },
-      "timeout_seconds": 30
-    },
-    {
-      "key": "identify",
-      "label": { "en": "Identify a device", "fr": "Identifier un appareil" },
-      "fields": [
-        {
-          "key": "device",
-          "type": "select",
-          "source": "devices",
-          "label": { "en": "Device", "fr": "Appareil" },
-          "required": true
-        }
-      ]
-    }
-  ],
-  "scene_triggers": [
-    {
-      "key": "motion_detected",
-      "label": { "en": "Motion detected", "fr": "Mouvement détecté" },
-      "description": {
-        "en": "A demo motion sensor saw a person or an animal move.",
-        "fr": "Un détecteur de démonstration a vu bouger une personne ou un animal."
+      "key": "accept_held_counters",
+      "label": {
+        "en": "Accept the held counters",
+        "fr": "Accepter les compteurs retenus"
       },
-      "fields": [
-        {
-          "key": "device",
-          "type": "select",
-          "source": "devices",
-          "label": { "en": "Sensor", "fr": "Détecteur" }
-        },
-        {
-          "key": "target",
-          "type": "multi_select",
-          "label": { "en": "What moved", "fr": "Ce qui a bougé" },
-          "options": [
-            { "value": "person", "label": { "en": "Person", "fr": "Personne" } },
-            { "value": "animal", "label": { "en": "Animal", "fr": "Animal" } }
-          ]
-        }
-      ],
-      "variables": [
-        {
-          "key": "target",
-          "type": "string",
-          "label": { "en": "What moved", "fr": "Ce qui a bougé" }
-        }
-      ]
-    }
-  ],
-  "scene_actions": [
-    {
-      "key": "identify_device",
-      "label": { "en": "Identify a device", "fr": "Identifier un appareil" },
       "description": {
-        "en": "Make a device signal itself (the demo light blinks).",
-        "fr": "Fait se signaler un appareil (la lampe de démonstration clignote)."
+        "en": "Only when the status shows counters held back (a jump or a drop) and they are right. Two clicks: the first lists the values held and accepts nothing, the second (a few seconds later, within 5 minutes) takes exactly those values. A jump is then counted at once as consumption; a drop counts nothing. Saving the configuration never accepts them.",
+        "fr": "Seulement quand l’état affiche des compteurs retenus (un saut ou une baisse) et qu’ils sont justes. Deux clics : le premier liste les valeurs retenues et n’accepte rien, le second (quelques secondes plus tard, dans les 5 minutes) prend exactement ces valeurs. Un saut est alors compté d’un coup comme consommation ; une baisse ne compte rien. Enregistrer la configuration ne les accepte jamais."
       },
-      "timeout_seconds": 15,
-      "fields": [
-        {
-          "key": "device",
-          "type": "select",
-          "source": "devices",
-          "label": { "en": "Device", "fr": "Appareil" },
-          "required": true
-        }
-      ],
-      "outputs": [
-        {
-          "key": "signalled",
-          "type": "boolean",
-          "label": { "en": "Device signalled", "fr": "Appareil signalé" }
-        }
-      ]
-    }
-  ],
-  "widgets": [
-    {
-      "key": "demo_status",
-      "label": { "en": "Demo status", "fr": "État de la démo" },
-      "description": {
-        "en": "Live temperature and plug power, plug connection and observed location.",
-        "fr": "Température et puissance en direct, connexion de la prise, position observée."
-      },
-      "icon": "activity",
-      "action_timeout_seconds": 15
+      "timeout_seconds": 10
     }
   ]
 }

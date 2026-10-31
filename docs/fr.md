@@ -1,67 +1,153 @@
-# Template de démonstration
+# GreenEye Monitor pour Gladys Assistant
 
-Ceci est la documentation utilisateur de l'intégration. Gladys ré-héberge ce
-fichier et affiche un lien **Documentation** permanent vers lui dans l'écran
-de configuration (dans la langue de l'utilisateur, avec l'anglais en repli) —
-c'est au moment de configurer que l'utilisateur en a le plus besoin. Gardez
-les courtes indications d'accueil dans les blocs `section` du `config_schema`
-du manifest ; mettez ici le pas-à-pas détaillé (captures d'écran, dépannage…).
+Cette intégration affiche dans Gladys les valeurs d’un **GreenEye Monitor**
+de Brultech (GEM), le moniteur d’énergie 32 canaux fabriqué en
+Colombie-Britannique : énergie et puissance de chaque canal, courant,
+tension, compteurs d’impulsions (eau, gaz) et températures. Tout reste sur
+votre réseau local, sans cloud.
+
+Intégration non officielle, sans lien avec Brultech. **Jamais testé avec un
+vrai GEM** : elle suit le document du format de paquets GEM de Brultech et les
+bibliothèques siobrultech-protocols et greeneye-monitor (MIT) de Home
+Assistant, et est testée sur leurs captures de paquets. Vos retours avec un
+vrai moniteur sont les bienvenus.
+
+**Lecture seule** : rien n’est jamais envoyé au GEM. L’intégration ne change
+aucun réglage du moniteur.
 
 ## Ce que vous obtenez
 
-Six appareils de démonstration apparaissent après l'installation : une
-station météo (vraies données Open-Meteo), un interrupteur, une lampe
-variable, une prise connectée avec mesure de puissance, un détecteur de
-mouvement et une caméra.
+- un appareil **GreenEye <numéro>** (le moniteur) : tension (V), les compteurs
+  d’impulsions qui ont compté (nombre brut d’impulsions), les températures
+  (°C) une fois leur unité choisie ;
+- un appareil par canal, **GreenEye <numéro> canal <n>** : index d’énergie
+  (kWh, pour le suivi énergétique de Gladys), puissance (W) et courant (A) ;
+  sur un canal NET qui produit (solaire), un index de l’énergie produite
+  (kWh), et une puissance négative pendant la production.
 
-## Configuration
+Un canal apparaît dans l’onglet **Découverte** dès qu’il a mesuré de
+l’énergie (son compteur a monté entre deux paquets). Les canaux inutilisés
+d’un paquet 48 canaux portent des valeurs parasites figées : ils n’apparaissent
+jamais d’eux-mêmes. Pour choisir les canaux vous-même, saisissez-les dans
+**Canaux à afficher** (comme `1-12, 15`).
 
-1. Ouvrez l'onglet **Configuration** de l'intégration.
-2. Renseignez la **latitude** et la **longitude** que la station météo de
-   démonstration doit observer (Paris par défaut), et choisissez votre unité
-   de température. L'**intervalle de rafraîchissement** règle la fréquence
-   de lecture de la station météo et de la puissance de la prise : toutes
-   les 5 minutes par défaut, toutes les minutes au plus.
-3. Enregistrez : les appareils apparaissent dans l'onglet **Découverte**,
-   prêts à être ajoutés.
+Le numéro de série du GEM est dans chaque identifiant externe : un second GEM
+ne reprend jamais l’historique du premier.
 
-Le réglage **Préférer la connexion locale** pilote la prise de
-démonstration : elle affiche en badge le canal réellement utilisé (local ou
-cloud), avec un point orange quand elle fonctionne en mode dégradé (local
-refusé, bascule cloud).
+## Réglages du GEM
 
-## Actions
+Dans la page web du GEM, dans les réglages d’envoi des paquets (« Packet
+Send », mode client TCP) :
 
-- **Tester le fournisseur météo** — effectue une requête en direct vers
-  Open-Meteo et affiche la température et l'humidité actuelles sous le
-  bouton.
-- **Identifier un appareil** — choisissez un de vos appareils dans la liste
-  et il se signale (la lampe de démonstration « clignote » dans les logs).
+- **serveur** : l’adresse IP de la machine Gladys sur votre réseau ;
+- **port** : le port affiché dans la section « Comment le GEM joint Gladys »
+  de l’écran de configuration (choisi par Gladys, voir plus bas) ;
+- **format de paquet** : un format binaire, BIN48-NET, BIN32-NET,
+  BIN48-NET-TIME, BIN48-ABS ou BIN32-ABS. Prenez un format NET si un canal
+  mesure une production solaire : avec un format ABS, le GEM compte ensemble
+  l’énergie des deux sens, et l’index d’un tel canal ajoute la production à la
+  consommation. Les formats ASCII et les moniteurs ECM-1220/1240 ne sont pas
+  pris en charge (l’état compte les paquets ECM ignorés) ;
+- **intervalle** : au choix (1 à 255 s). La puissance est la moyenne sur les
+  deux derniers paquets.
 
-## Scènes
+### Températures : choisissez l’unité du GEM
 
-L'intégration ajoute ses propres cartes à l'éditeur de scènes (Gladys 5.1
-ou plus récent), dans la catégorie **Intégrations** :
+Les paquets portent les températures dans l’unité réglée sur le GEM (°C ou
+°F) sans dire laquelle. Choisissez-la dans **Unité de température réglée sur
+le GEM** : les valeurs en °F sont converties exactement en °C ((°F − 32) ×
+5/9, arrondi à 0,01), et les bornes (−55 à 125 °C, la plage des sondes) sont
+vérifiées après conversion. Désactivé (par défaut) : aucune température n’est
+publiée. Une sonde qui lit exactement 0 ou « pas de sonde » (au-dessus de 255)
+n’est pas une valeur : jamais publiée.
 
-- **Mouvement détecté** (déclencheur) — lance la scène quand un détecteur
-  de démonstration voit bouger quelque chose. Choisissez éventuellement le
-  détecteur et ce qui a bougé (personne, animal) ; laissés vides, toute
-  détection correspond. Les actions suivantes peuvent lire ce qui a bougé
-  avec `{{triggerEvent.data.target}}`.
-- **Identifier un appareil** (action) — fait se signaler l'appareil choisi.
-  Elle indique si l'appareil a pu se signaler, pour que les actions
-  suivantes puissent en dépendre.
+## Comment le GEM joint Gladys
 
-## Tableau de bord
+C’est le GEM qui ouvre la connexion (TCP) ; Gladys ne l’interroge pas.
+L’intégration démarre donc un petit récepteur à côté d’elle (le conteneur
+`gem-link`), dont Gladys publie le port sur la machine.
 
-Ajoutez le widget **État de la démo** à un tableau de bord : il affiche en
-direct la température de la station météo et la puissance de la prise du
-bureau, la connexion utilisée par la prise (en orange si dégradée) et la
-position observée. Son bouton **Identifier la lampe** fait se signaler la
-lampe de démonstration.
+1. Donnez au GEM une adresse IP fixe dans votre box.
+2. Dans l’écran **Configuration** de l’intégration, saisissez cette adresse et
+   enregistrez. **Rien n’écoute avant** : le récepteur ne démarre qu’une fois
+   une adresse valide enregistrée, et s’arrête si vous l’effacez.
+3. Rechargez l’écran : la section « Comment le GEM joint Gladys » affiche le
+   port choisi par Gladys (un port libre, gardé ensuite).
+4. Réglez le GEM comme ci-dessus. L’état passe à « GEM … connecté » au premier
+   paquet.
 
-## Dépannage
+Le cœur de Gladys tourne sur le réseau hôte de la machine
+(`network_mode: host`), mais les intégrations tournent dans des conteneurs
+isolés : elles ne peuvent pas écouter elles-mêmes sur la machine. Le
+récepteur `gem-link` est un sous-conteneur déclaré dans le manifeste, dont
+Gladys publie le port TCP 8000 sur toutes les adresses de la machine. C’est le
+même mécanisme que l’intégration Wolf ISM8, vérifié dans un Gladys de test :
+une connexion venant du réseau garde sa vraie adresse source ; une connexion
+partie de la machine Gladys elle-même arrive avec l’adresse de la passerelle
+Docker. Donc :
 
-L'intégration journalise tout ce qu'elle fait : consultez les logs de
-l'intégration depuis l'interface Gladys (ou `docker logs` sur l'hôte) avec
-`LOG_LEVEL=debug` pour le détail complet.
+- autorisez ce port TCP dans le pare-feu de la machine, s’il y en a un ;
+- **Vérifier l’expéditeur** (activé par défaut) n’accepte que l’adresse du
+  GEM ; une autre adresse est refusée avant la lecture du moindre octet et
+  affichée dans l’état. Avec Docker Desktop (Mac, Windows) ou Docker rootless,
+  Docker peut remplacer l’adresse source : désactivez l’option dans ce seul
+  cas. Toute machine de votre réseau peut alors envoyer de fausses valeurs au
+  nom du GEM (son numéro de série reste vérifié) ;
+- le récepteur n’est redémarré que s’il s’est arrêté ou si l’adresse ou la
+  vérification de l’expéditeur change ; quand l’intégration redémarre, Gladys
+  redémarre aussi le récepteur et le GEM se reconnecte de lui-même.
+
+## Quel GEM est suivi
+
+Le numéro de série (le numéro à 8 positions affiché par le GEM) est lu dans chaque
+paquet. Le premier GEM entendu est suivi et gardé dans `/data` ; les paquets
+d’un autre numéro de série sont refusés et l’état le dit. Après un
+remplacement du moniteur, saisissez le nouveau numéro dans **Numéro de série
+du GEM** : il a ses propres appareils.
+
+## Compteurs à vie : jamais 0, ni baisse ni saut sans vous
+
+L’index d’énergie d’un canal, son index de production et les compteurs
+d’impulsions sont les valeurs que le suivi énergétique de Gladys transforme en
+consommation : il compte chaque hausse en entier. Donc :
+
+- une valeur 0 n’est pas publiée ;
+- une valeur est comparée à la dernière acceptée : pas plus basse, et pas plus
+  de 100 kWh par heure en moyenne pour un canal (100 impulsions par seconde
+  pour un compteur d’impulsions), plus une petite marge ;
+- une **baisse** (remise à zéro du GEM, compteur à sa limite, pince
+  remplacée) ou un **saut** est **retenu** : la dernière valeur acceptée est
+  renvoyée, rien n’est compté, l’état liste le compteur avec la valeur
+  retenue, et la retenue est gardée dans `/data` d’un redémarrage à l’autre.
+  Le temps ne la lève pas, la répétition de la même valeur non plus ;
+- si c’est réel, cliquez deux fois sur **Accepter les compteurs retenus**
+  dans l’écran de configuration : le premier clic liste exactement ce qui sera
+  pris et n’accepte rien ; le second, après quelques secondes et dans les 5
+  minutes, prend exactement ces valeurs (un saut est alors compté d’un coup
+  comme consommation ; une baisse ne compte rien et le compteur repart de
+  là). Si les compteurs retenus ont changé entre-temps, rien n’est accepté.
+  Enregistrer la configuration n’accepte rien.
+
+Les contrôles tournent sur l’horloge de l’intégration (l’heure murale lue une
+fois à son démarrage plus le temps écoulé depuis) : une heure murale déplacée
+par NTP ne les élargit ni ne les resserre.
+
+## Fraîcheur et état
+
+- Les valeurs sont publiées à l’arrivée d’un paquet. Les paquets gardés par le
+  récepteur pendant l’absence de l’intégration sont abandonnés s’ils ont plus
+  d’une minute ; un paquet répété ou plus ancien (d’après le compteur de
+  secondes du GEM) est abandonné.
+- Aucun paquet depuis 2 minutes (ou trois intervalles du GEM, jusqu’à 15
+  minutes) : l’état dit depuis combien de temps, l’intégration n’est pas
+  « connectée », et rien n’est inventé.
+- Gladys accepte 300 valeurs par minute : avec beaucoup de canaux et un
+  intervalle court, les valeurs partent à tour de rôle (la plus récente de
+  chacune), 250 par minute au plus.
+
+## Limites
+
+- Un GEM par intégration.
+- L’API de réglages du GEM (types de pinces, intervalles) n’est pas utilisée.
+- Non pris en charge : formats de paquets ASCII, moniteurs ECM-1220/1240,
+  compteurs d’impulsions convertis en volumes (ce sont des nombres bruts).
