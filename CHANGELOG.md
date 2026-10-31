@@ -10,6 +10,8 @@ the notes of the version's GitHub Release.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-31
+
 ### Added
 
 - First version: a Brultech GreenEye Monitor, locally and read only. The GEM
@@ -35,3 +37,6 @@ the notes of the version's GitHub Release.
 - A restart of the GEM in a new connection is taken (and said), a hanging
   /data write is said, an unreadable /data pins no serial, a cleared serial
   field follows the first GEM heard again.
+
+[Unreleased]: https://github.com/LM1LC3N7/gladys-greeneye/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/LM1LC3N7/gladys-greeneye/releases/tag/v0.1.1

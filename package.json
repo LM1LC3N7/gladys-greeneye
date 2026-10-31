@@ -1,6 +1,6 @@
 {
   "name": "gladys-greeneye",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "Gladys Assistant external integration for the Brultech GreenEye Monitor (local TCP, the monitor pushes its packets to Gladys): energy index, power and current per channel, voltage, pulse counters, temperatures. Read only. Unofficial, not affiliated with Brultech.",
   "type": "module",
