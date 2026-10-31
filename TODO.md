@@ -128,9 +128,17 @@ up to date at the end of every milestone.
     elapsed (2 min or 5 %). The margin of the wrap counts over those GEM
     seconds. A reset near the top is a drop, held (scenarios s9a-s9c); a true
     wrap during a long absence is counted (s9d).
-  - The session of the last packet is forgotten when the channel goes up or
-    down (the link numbers its sessions from 1 at each start).
+  - The session of the last packet is forgotten when the channel comes up
+    (the link numbers its sessions from 1 at each start; going down needs
+    nothing more, no packet arrives before the next "up").
   - /data keeps `serials` as a list, oldest first (the eviction drops the
     oldest after a restart too).
   - Tests for the surviving mutants: stale `.tmp`, serial changed during the
     Gladys read, one counters check at a time, serial retyped, 8 serials.
+- **Review r3** (2026-10-31): no code change. A test for each surviving
+  mutant of the wrap rule, on the reviewer's scenarios: a reset 1 h (s13a,
+  tolerance 2 min) or 1.5 h (s13a2, 5 %) before the module comes back from
+  2 h away is held; after a reboot of the GEM a true wrap is counted on (the
+  seconds of the last packet are the base, s13b); a fall of 1.48 kWh through
+  the top in 10 s is held (the margin of the wrap, s13d). Equivalent
+  survivors: E3, S2, W5, T2, X2, X9, X10, X11.

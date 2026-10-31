@@ -1193,3 +1193,93 @@ test('r2 K3/K4: typing the serial already followed marks it typed; 8 serials kep
   assert.ok(!kept.includes(SERIAL) && !kept.includes(3_000_001), 'the oldest dropped');
   assert.ok(JSON.stringify(store.data).length < 256 * 1024);
 });
+
+// --- Review r3: the wrap rule pinned (mutants X3, X4, X5, X12) ------------------------------
+
+/**
+ * The reviewer's s13a: the GEM restarted 5 min before the module stops (its
+ * seconds near 300), 50 kWh under the top of its counter; the module is away
+ * 2 h; the GEM is reset `resetAgo` seconds before the module comes back. Its
+ * seconds count `resetAgo - 280` against ~7200 elapsed: not a GEM that ran on.
+ */
+async function resetDuringAbsence(t, resetAgo) {
+  const W40 = 2 ** 40;
+  const start = W40 - 50 * KWH;
+  const shape = (s) => ({ absolute: [start + (s - 190) * 1000, 5] });
+  const ctx = await running(t, { shape, gem: { format: 'BIN32_ABS', start: 190 } });
+  await ctx.flush();
+  const top = ctx.gladys.fake.lastState(channelFeature(1, 'index'));
+  assert.ok(top > 305_369 && top < 305_370);
+  await ctx.app.stop();
+  assert.equal(unitIn(ctx.store, SERIAL).gem.seconds, 270, 'the last GEM seconds kept in /data');
+  const devices = ctx.gladys.devices;
+  await ctx.advance(2 * 60 * MINUTE);
+  const again = await setup(t, { store: ctx.store, clock: ctx.clock, gladysOptions: { devices } });
+  await again.gemUp();
+  const g = gem(again, (s) => ({ absolute: [0.01 * KWH + (s - resetAgo) * 1000, 5] }), {
+    start: resetAgo,
+    format: 'BIN32_ABS',
+  });
+  await g.next(8);
+  await again.flush();
+  assert.match(msg(again.gladys), /channel 1: [\d.]+ → 0\.\d+ kWh \(drop\)/);
+  assert.ok(states(again.gladys, channelFeature(1, 'index')).every((v) => v <= top + 0.01));
+  assert.ok(!again.logs.some((l) => /wrapped around/.test(l)), 'never taken for a wrap');
+}
+
+test('r3 X4 (s13a): the GEM reset 1 h before the module comes back from 2 h away: 3330 s counted against 7200 s, a drop, held', async (t) => {
+  // Off by ~3880 s: over 5 % of 2 h (360 s) and 2 min, under 50 % and 2 h.
+  await resetDuringAbsence(t, 3600);
+});
+
+test('r3 X3 (s13a2): the GEM reset 1.5 h before the module comes back from 2 h away: 5130 s counted against 7200 s, a drop, held', async (t) => {
+  // Off by ~2080 s: over 5 % of 2 h (360 s), under 50 % (3600 s).
+  await resetDuringAbsence(t, 5400);
+});
+
+test('r3 X5 (s13b): the GEM rebooted (counters kept), then a true wrap: counted on, never held', async (t) => {
+  const W40 = 2 ** 40;
+  const shape = (s) => ({ absolute: [W40 - 0.05 * KWH + (s - 1000) * 1000, 5] });
+  const ctx = await running(t, { shape, gem: { format: 'BIN32_ABS' } });
+  await ctx.flush();
+  const top = ctx.gladys.fake.lastState(channelFeature(1, 'index'));
+  // The GEM reboots: a new connection, its seconds from 5, its counters kept
+  // (55 000 Ws under the top): it wraps at the 7th packet.
+  ctx.channel().emit('message', { type: 'session', state: 'down', session: 1, at: ctx.at() });
+  await ctx.advance(30 * SECOND);
+  await ctx.gemUp(2);
+  const g = gem(ctx, (s) => ({ absolute: [(W40 - 55_000 + (s - 5) * 1000) % W40, 5] }), {
+    start: 5,
+    format: 'BIN32_ABS',
+  });
+  await g.next(14);
+  await ctx.flush();
+  assert.ok(ctx.logs.some((l) => /GEM counter abs-1 wrapped around/.test(l)));
+  assert.doesNotMatch(msg(ctx.gladys), /held back/);
+  const index = states(ctx.gladys, channelFeature(1, 'index'));
+  assert.ok(index.at(-1) > 305_419.9, `counted on past the top: ${index.at(-1)}`);
+  assert.ok(index.every((v, i, a) => i === 0 || v >= a[i - 1]) && index.at(-1) > top);
+  // The GEM seconds of the LAST packet are the base of the next step.
+  assert.equal(ctx.app.unit().gem.seconds, 135, 'the GEM seconds of the last packet');
+});
+
+test('r3 X12 (s13d): seconds going on, the raw counter falls from 1 kWh under the top to 0.5 kWh in 10 s: a drop, held', async (t) => {
+  const W40 = 2 ** 40;
+  let fallen;
+  // 1.48 kWh through the top in 10 s: over the wrap margin of 10 s (0.78 kWh),
+  // under the guard's margin of a minute (2.17 kWh).
+  const shape = (s) => ({
+    absolute: [
+      fallen === undefined ? W40 - KWH + (s - 1000) * 1000 : 0.5 * KWH + (s - fallen) * 1000,
+      5,
+    ],
+  });
+  const ctx = await running(t, { shape, gem: { format: 'BIN32_ABS' } });
+  const top = ctx.gladys.fake.lastState(channelFeature(1, 'index'));
+  fallen = ctx.g.seconds;
+  await ctx.g.next(8);
+  await ctx.flush();
+  assert.match(msg(ctx.gladys), /channel 1: [\d.]+ → 0\.5\d* kWh \(drop\)/);
+  assert.ok(states(ctx.gladys, channelFeature(1, 'index')).every((v) => v <= top + 0.01));
+  assert.ok(!ctx.logs.some((l) => /wrapped around/.test(l)), 'never taken for a wrap');
+});
