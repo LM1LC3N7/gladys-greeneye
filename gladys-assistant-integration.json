@@ -102,8 +102,8 @@
         "fr": "Vérifier l’expéditeur"
       },
       "description": {
-        "en": "Accept the connection only from the address of the GEM. Turn it off only if the status says connections come from another address because Docker hides the real one on this machine: then any machine of your network can send false values in the name of the GEM (its serial number is still checked).",
-        "fr": "N’accepter la connexion que depuis l’adresse du GEM. À désactiver seulement si l’état dit que les connexions viennent d’une autre adresse parce que Docker masque la vraie sur cette machine : toute machine de votre réseau peut alors envoyer de fausses valeurs au nom du GEM (son numéro de série reste vérifié)."
+        "en": "Accept the connection only from the address of the GEM. Turn it off only if the status says connections come from another address because Docker hides the real one on this machine: then any machine of your network that copies the serial number of the GEM can send false values, which go into the energy indexes. Even on, a machine taking the IP address of the GEM gets through: keep the GEM on a trusted network.",
+        "fr": "N’accepter la connexion que depuis l’adresse du GEM. À désactiver seulement si l’état dit que les connexions viennent d’une autre adresse parce que Docker masque la vraie sur cette machine : toute machine de votre réseau qui recopie le numéro de série du GEM peut alors envoyer de fausses valeurs, qui entrent dans les index d’énergie. Même activé, une machine qui prend l’adresse IP du GEM passe : gardez le GEM sur un réseau de confiance."
       },
       "required": false,
       "default": true

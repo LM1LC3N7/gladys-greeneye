@@ -144,6 +144,16 @@ test('the reader: packets cut anywhere, glued, junk and malformed skipped, ECM c
     assert.equal(reader.ecm, 1);
     assert.equal(reader.buffered, 0);
   }
+  // Megabytes in one chunk: never more than two packets' worth held at once.
+  class Peak extends PacketReader {
+    drain(packets) {
+      this.peak = Math.max(this.peak ?? 0, this.buffer.length);
+      super.drain(packets);
+    }
+  }
+  const peak = new Peak();
+  peak.push(Buffer.concat([Buffer.alloc(100_000, 0x41), capture('BIN32-NET')]));
+  assert.ok(peak.peak <= 1250, String(peak.peak));
   // Megabytes of junk: never more than two packets' worth kept.
   const reader = new PacketReader();
   for (let i = 0; i < 100; i += 1) {
@@ -257,42 +267,60 @@ test('the guard: /data and Gladys, the oldest date of an equal value, a hold kep
   assert.deepEqual(newer.last, { value: 12, at: 5000 });
 });
 
-test('/data read back: bounded, known keys only, future dates now, guards only with a serial', () => {
+test('/data read back: bounded, known keys only, future dates now, per serial', () => {
   const memory = normalizeMemory(
     {
       token: 'a'.repeat(43),
       serial: 1100603,
+      typed: true,
       format: 'BIN48-NET',
-      seen: {
-        channels: [1, 2, 99, 'x'],
-        temps: [8, 9],
-        pulses: [1],
-        produced: [3],
-        __proto__: [1],
-      },
-      guards: {
-        ch1: { last: { value: 12.5, at: 9e15 }, held: null },
-        'ch2-prod': {
-          last: { value: 1, at: 10 },
-          held: { direction: 'up', from: 1, to: 9, threshold: 9, at: 20 },
+      serials: {
+        1100603: {
+          seen: {
+            channels: [1, 2, 99, 'x'],
+            temps: [8, 9],
+            pulses: [1],
+            produced: [3],
+            __proto__: [1],
+          },
+          guards: {
+            ch1: { last: { value: 12.5, at: 9e15 }, held: null },
+            'ch2-prod': {
+              last: { value: 1, at: 10 },
+              held: { direction: 'up', from: 1, to: 9, threshold: 9, at: 2e15 },
+            },
+            ch49: { last: { value: 1, at: 1 } },
+            'pulse-3': { last: { value: 0, at: 1 } },
+            constructor: { last: { value: 1, at: 1 } },
+          },
+          wraps: {
+            'abs-1': { raw: 5, offset: 2 ** 40, at: 9e15 },
+            'pol-49': { raw: 5, offset: 0, at: 1 },
+            'pulse-2': { raw: -1, offset: 0, at: 1 },
+            'abs-2': { raw: 1.5, offset: 0, at: 1 },
+          },
         },
-        ch49: { last: { value: 1, at: 1 } },
-        'pulse-3': { last: { value: 0, at: 1 } },
-        constructor: { last: { value: 1, at: 1 } },
+        99999999: { seen: { channels: [1] } },
+        abc: {},
       },
     },
     1000,
   );
-  assert.deepEqual([...memory.seen.channels], [1, 2]);
-  assert.deepEqual([...memory.seen.temps], [8]);
-  assert.deepEqual(Object.keys(memory.guards), ['ch1', 'ch2-prod']);
-  assert.equal(memory.guards.ch1.last.at, 1000);
-  assert.equal(memory.guards['ch2-prod'].held.to, 9);
-  const noSerial = normalizeMemory({ guards: { ch1: { last: { value: 1, at: 1 } } } }, 1000);
-  assert.deepEqual(noSerial.guards, {});
+  assert.equal(memory.typed, true);
+  assert.deepEqual([...memory.serials.keys()], [1100603]);
+  const unit = memory.serials.get(1100603);
+  assert.deepEqual([...unit.seen.channels], [1, 2]);
+  assert.deepEqual([...unit.seen.temps], [8]);
+  assert.deepEqual(Object.keys(unit.guards), ['ch1', 'ch2-prod']);
+  assert.equal(unit.guards.ch1.last.at, 1000);
+  assert.equal(unit.guards['ch2-prod'].held.to, 9);
+  assert.equal(unit.guards['ch2-prod'].held.at, 1000, 'a hold dated in the future is now');
+  assert.deepEqual(Object.keys(unit.wraps), ['abs-1']);
+  assert.deepEqual(unit.wraps['abs-1'], { raw: 5, offset: 2 ** 40, at: 1000 });
   const round = normalizeMemory(JSON.parse(JSON.stringify(serializeMemory(memory))), 1000);
   assert.deepEqual(serializeMemory(round), serializeMemory(memory));
   assert.equal(normalizeMemory({ serial: 99_999_999 }, 1).serial, undefined);
+  assert.equal(normalizeMemory({ serial: 5, typed: 'yes' }, 1).typed, false);
 });
 
 test('the file store: missing is empty, a FIFO and a directory refused without waiting, too large refused', async (t) => {
@@ -312,4 +340,33 @@ test('the file store: missing is empty, a FIFO and a directory refused without w
   const good = fileStore(join(dir, 'good.json'));
   await Promise.all([good.save({ a: 1 }), good.save({ a: 2 })]);
   assert.deepEqual(await good.load(), { a: 2 });
+});
+
+test('the guard: a held jump is never taken by time, even with readings an hour apart', () => {
+  const g = new CounterGuard(GUARDS.energy, { value: 100, at: 0 }, undefined, 0);
+  assert.equal(g.accept(100.5, H / 60), true);
+  // 50 kWh within a minute: held.
+  assert.equal(g.accept(150.5, H / 30), false);
+  // The same value an hour later, then every hour: still held (its margin since the hold is large).
+  for (let i = 1; i <= 24; i += 1) assert.equal(g.accept(150.5 + i * 0.01, H / 30 + i * H), false);
+  assert.equal(g.last.value, 100.5);
+});
+
+test('the guard: under a held jump, a value must fit the short margin since the hold', () => {
+  // The last value accepted an hour ago: its own margin is 100.5 kWh.
+  const g = new CounterGuard(GUARDS.energy, { value: 100, at: 0 }, undefined, 0);
+  assert.equal(g.accept(400, H), false, '300 kWh in an hour: held');
+  // A minute later, 150 (under the hold): within the hour's margin, not within a minute's.
+  assert.equal(g.accept(150, H + H / 60), false);
+  assert.equal(g.held.to, 150);
+  assert.equal(g.last.value, 100);
+});
+
+test('the guard: an accepted drop is a floor until a value is taken', () => {
+  const g = new CounterGuard(GUARDS.energy, { value: 500, at: 0 }, undefined, 0);
+  assert.equal(g.accept(10, H), false);
+  g.acceptHeld();
+  assert.equal(g.accept(5, H + 1000), false, 'under the floor accepted');
+  assert.equal(g.held.direction, 'down');
+  assert.equal(g.accept(10.1, H + 2000), true);
 });

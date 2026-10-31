@@ -103,3 +103,21 @@ up to date at the end of every milestone.
   older than a minute dropped), only features of created devices.
 - **Store keys** (`keywords`, `countries`): not set in the manifest (CA, US
   would fit).
+- **Review r1 fixes** (2026-10-31):
+  - Wraps: every raw counter (`abs-<n>`, `pol-<n>`, `pulse-<n>`) is
+    unwrapped with an offset kept in /data per serial: a step back of more
+    than half the range whose forward step through the top fits the margin
+    since the last raw value is a wrap (+2^40 or +2^24); any other step back
+    stays a drop for the guard. Consumption = unwrapped absolute − unwrapped
+    polarized. A counter reading 0 or less is said in the status.
+  - /data per serial (`serials`, 8 kept): seen, guards and wraps are never
+    wiped by a change of serial. A guard with nothing in /data is built on a
+    fresh `getDevices()` (bounded); a failed read checks nothing that round.
+  - Order: a step back of the GEM seconds in the same connection is an old
+    packet (dropped); in a new connection it is a restart (taken, said 10 min).
+  - /data unreadable: no pin learned, only a typed serial followed.
+    A write hanging over 5 s is said; the `.tmp` is removed and created
+    `O_EXCL | O_NONBLOCK`. A cleared serial field (`typed` in /data) follows
+    the first GEM heard again.
+  - The reviewer's scenarios s2b/s2c/s2d (written against r1) expect a hold
+    on a wrap; the fix unwraps instead, as the review asked.

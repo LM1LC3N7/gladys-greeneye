@@ -8,14 +8,21 @@
 //            each side that the other one is ours.
 //   linkEnv  16 hex characters of the hash of the environment the link was
 //            last started with (the link is started again only when it changes)
-//   serial   the serial number of the GEM first heard (pinned: the packets of
+//   serial   the serial number of the GEM followed (pinned: the packets of
 //            another GEM are refused until its serial is typed in the
-//            configuration)
+//            configuration); `typed` whether it came from the configuration
+//            (a field cleared then follows the first GEM heard again)
 //   format   the packet format last seen (BIN48-NET...), for the status
-//   seen     the channels, production channels, temperature sensors and
-//            pulse counters seen working (the Discovery is rebuilt from them)
-//   guards   per counter (`ch<n>`, `ch<n>-prod`, `pulse-<n>`): the last value
-//            accepted and the value held back, session dates (src/app.js)
+//   serials  per serial number (8 at most, the most recent kept), never
+//            wiped by a change of serial (a mistyped serial then the right
+//            one keeps every hold):
+//     seen    the channels, production channels, temperature sensors and
+//             pulse counters seen working (the Discovery is rebuilt from them)
+//     guards  per counter (`ch<n>`, `ch<n>-prod`, `pulse-<n>`): the last value
+//             accepted and the value held back, session dates (src/app.js)
+//     wraps   per raw counter of the GEM (`abs-<n>`, `pol-<n>`, `pulse-<n>`):
+//             the last raw value, the offset added by the wraps of its
+//             5-byte (2^40 Ws) or 3-byte (2^24) field, and the session date
 //
 // Never waits without bound (lessons of gladys-gce and gladys-ipx800 0.1.3):
 // the file is opened non-blocking, a special file (FIFO, device) is refused,
@@ -27,7 +34,7 @@
 // -----------------------------------------------------------------------------
 
 import { constants } from 'node:fs';
-import { open, rename, writeFile } from 'node:fs/promises';
+import { open, rename, rm } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import { MAX_CHANNELS, MAX_SERIAL } from './config.js';
 import { NUM_PULSE_COUNTERS, NUM_TEMPERATURE_SENSORS } from './gem/packets.js';
@@ -83,7 +90,19 @@ export function fileStore(path = STATE_FILE) {
       const text = JSON.stringify(data);
       const write = chain.then(async () => {
         const temporary = `${path}.tmp`;
-        await writeFile(temporary, text, { mode: 0o600, flag: 'w' });
+        // Whatever sits there (a FIFO would block a plain open) is removed,
+        // then the file is created anew, non-blocking, never followed.
+        await rm(temporary, { force: true });
+        const handle = await open(
+          temporary,
+          constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NONBLOCK,
+          0o600,
+        );
+        try {
+          await handle.writeFile(text, 'utf8');
+        } finally {
+          await handle.close().catch(() => {});
+        }
         await rename(temporary, path);
       });
       chain = write.catch(() => {});
@@ -123,14 +142,26 @@ export function memoryStore(initial = null, { failing = false, unreadable = fals
   };
 }
 
+export const emptySeen = () => ({
+  channels: new Set(),
+  produced: new Set(),
+  temps: new Set(),
+  pulses: new Set(),
+});
+
+export const emptyUnit = () => ({ seen: emptySeen(), guards: {}, wraps: {} });
+
 export const emptyMemory = () => ({
   token: undefined,
   linkEnv: undefined,
   serial: undefined,
+  typed: false,
   format: undefined,
-  seen: { channels: new Set(), produced: new Set(), temps: new Set(), pulses: new Set() },
-  guards: {},
+  /** serial -> { seen, guards, wraps } */
+  serials: new Map(),
 });
+
+export const MAX_SERIALS = 8;
 
 const SEEN_LIMITS = {
   channels: MAX_CHANNELS,
@@ -141,8 +172,11 @@ const SEEN_LIMITS = {
 
 /** The keys of the counters: `ch<n>`, `ch<n>-prod`, `pulse-<n>`. */
 export const GUARD_KEY = /^(?:ch([1-9]|[1-3]\d|4[0-8])(?:-prod)?|pulse-[1-4])$/;
+/** The keys of the raw counters of the GEM: `abs-<n>`, `pol-<n>`, `pulse-<n>`. */
+export const WRAP_KEY = /^(?:(?:abs|pol)-(?:[1-9]|[1-3]\d|4[0-8])|pulse-[1-4])$/;
 
 const finite = (value) => typeof value === 'number' && Number.isFinite(value);
+const isSerial = (n) => Number.isInteger(n) && n >= 1 && n <= MAX_SERIAL;
 
 /** A reference or a hold read from /data, its date bounded by `now` (a future date is now). */
 function guardEntry(raw, now) {
@@ -170,6 +204,48 @@ function guardEntry(raw, now) {
   return last ? { last, held } : undefined;
 }
 
+/** A wrap entry read from /data: whole raw and offset, a date bounded by now. */
+function wrapEntry(raw, now) {
+  if (!isObject(raw)) return undefined;
+  const ok =
+    Number.isSafeInteger(raw.raw) &&
+    raw.raw >= 0 &&
+    Number.isSafeInteger(raw.offset) &&
+    raw.offset >= 0 &&
+    finite(raw.at) &&
+    raw.at > 0;
+  return ok ? { raw: raw.raw, offset: raw.offset, at: Math.min(raw.at, now) } : undefined;
+}
+
+function unitOf(raw, now) {
+  const unit = emptyUnit();
+  if (!isObject(raw)) return unit;
+  if (Object.hasOwn(raw, 'seen') && isObject(raw.seen)) {
+    for (const [kind, max] of Object.entries(SEEN_LIMITS)) {
+      const list = Object.hasOwn(raw.seen, kind) ? raw.seen[kind] : undefined;
+      if (!Array.isArray(list)) continue;
+      for (const n of list.slice(0, max)) {
+        if (Number.isInteger(n) && n >= 1 && n <= max) unit.seen[kind].add(n);
+      }
+    }
+  }
+  if (Object.hasOwn(raw, 'guards') && isObject(raw.guards)) {
+    for (const key of Object.keys(raw.guards).slice(0, 120)) {
+      if (!GUARD_KEY.test(key)) continue;
+      const entry = guardEntry(raw.guards[key], now);
+      if (entry) unit.guards[key] = entry;
+    }
+  }
+  if (Object.hasOwn(raw, 'wraps') && isObject(raw.wraps)) {
+    for (const key of Object.keys(raw.wraps).slice(0, 120)) {
+      if (!WRAP_KEY.test(key)) continue;
+      const entry = wrapEntry(raw.wraps[key], now);
+      if (entry) unit.wraps[key] = entry;
+    }
+  }
+  return unit;
+}
+
 /** From the file (any shape) to the memory; `now` (wall) replaces a time in the future. */
 export function normalizeMemory(raw, now) {
   const memory = emptyMemory();
@@ -182,31 +258,18 @@ export function normalizeMemory(raw, now) {
   if (Object.hasOwn(raw, 'linkEnv') && /^[0-9a-f]{16}$/.test(String(raw.linkEnv))) {
     memory.linkEnv = raw.linkEnv;
   }
-  if (
-    Object.hasOwn(raw, 'serial') &&
-    Number.isInteger(raw.serial) &&
-    raw.serial >= 1 &&
-    raw.serial <= MAX_SERIAL
-  ) {
+  if (Object.hasOwn(raw, 'serial') && isSerial(raw.serial)) {
     memory.serial = raw.serial;
+    memory.typed = raw.typed === true;
   }
   if (Object.hasOwn(raw, 'format') && /^BIN(?:32|48)-(?:NET|ABS)(?:-TIME)?$/.test(raw.format)) {
     memory.format = raw.format;
   }
-  if (Object.hasOwn(raw, 'seen') && isObject(raw.seen)) {
-    for (const [kind, max] of Object.entries(SEEN_LIMITS)) {
-      const list = Object.hasOwn(raw.seen, kind) ? raw.seen[kind] : undefined;
-      if (!Array.isArray(list)) continue;
-      for (const n of list.slice(0, max)) {
-        if (Number.isInteger(n) && n >= 1 && n <= max) memory.seen[kind].add(n);
-      }
-    }
-  }
-  if (Object.hasOwn(raw, 'guards') && isObject(raw.guards) && memory.serial !== undefined) {
-    for (const key of Object.keys(raw.guards).slice(0, 120)) {
-      if (!GUARD_KEY.test(key)) continue;
-      const entry = guardEntry(raw.guards[key], now);
-      if (entry) memory.guards[key] = entry;
+  if (Object.hasOwn(raw, 'serials') && isObject(raw.serials)) {
+    for (const key of Object.keys(raw.serials).slice(0, MAX_SERIALS)) {
+      const serial = /^\d{1,8}$/.test(key) ? Number(key) : NaN;
+      if (!isSerial(serial)) continue;
+      memory.serials.set(serial, unitOf(raw.serials[key], now));
     }
   }
   return memory;
@@ -214,12 +277,20 @@ export function normalizeMemory(raw, now) {
 
 export function serializeMemory(memory) {
   const sorted = (set) => [...set].sort((a, b) => a - b);
+  const serials = {};
+  for (const [serial, unit] of [...memory.serials].slice(-MAX_SERIALS)) {
+    serials[String(serial)] = {
+      seen: Object.fromEntries(Object.entries(unit.seen).map(([k, v]) => [k, sorted(v)])),
+      guards: unit.guards,
+      wraps: unit.wraps,
+    };
+  }
   return {
     token: memory.token,
     linkEnv: memory.linkEnv,
     serial: memory.serial ?? null,
+    typed: memory.typed === true,
     format: memory.format ?? null,
-    seen: Object.fromEntries(Object.entries(memory.seen).map(([k, v]) => [k, sorted(v)])),
-    guards: memory.guards,
+    serials,
   };
 }

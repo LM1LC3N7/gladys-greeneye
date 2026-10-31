@@ -44,7 +44,10 @@ TCP client mode):
   BIN48-ABS or BIN32-ABS. Use a NET format if a channel measures a solar
   production: with an ABS format the GEM counts the energy of both directions
   together, and the index of such a channel adds the production to the
-  consumption. The ASCII formats and the ECM-1220/1240 monitors are not
+  consumption. On a NET channel the GEM counts the production in its
+  "polarized" counter: the CT must face the way the GEM expects (the
+  direction set on the GEM), otherwise consumption and production swap (the
+  status says when a consumption index reads 0 or less). The ASCII formats and the ECM-1220/1240 monitors are not
   handled (the status counts the ECM packets ignored);
 - **interval**: any (1 to 255 s). The power is the average over the last two
   packets.
@@ -87,18 +90,29 @@ arrives with the address of the Docker gateway. Hence:
   another address is refused before a byte is read and shown in the status.
   With Docker Desktop (Mac, Windows) or rootless Docker, Docker may replace
   the source address: turn the option off in that case only. Any machine of
-  your network can then send false values in the name of the GEM (its serial
-  number is still checked);
+  your network can then take the place of the GEM: it only has to copy its
+  serial number (it is in every packet) to send false values, and those
+  values go into the energy indexes (up to 100 kWh per hour per channel
+  without being held). Even with the check on, a machine that takes the IP
+  address of the GEM (the GEM switched off, an ARP spoof) gets through:
+  keep the GEM on a trusted network;
 - the receiver is started again only when it stopped or when the address or
   the sender check changes; when the integration restarts, Gladys restarts
-  the receiver too and the GEM reconnects by itself.
+  the receiver too and the GEM reconnects by itself. When the receiver runs
+  but does not answer the integration for 3 minutes (another secret, for
+  example after `/data` could not be read and a new one was made), it is
+  started again, at most every 10 minutes.
 
 ## Which GEM is followed
 
 The serial number (the 8 digits the GEM shows) is read in every packet. The
 first GEM heard is followed and kept in `/data`; the packets of another serial
 number are refused and the status says so. After replacing the monitor, type
-the new serial in **Serial number of the GEM**: it gets its own devices.
+the new serial in **Serial number of the GEM**: it gets its own devices. What
+was seen and held for each serial stays in `/data` under its serial (8 at
+most): a serial mistyped then corrected keeps every hold. Clearing the field
+follows the first GEM heard again. When `/data` cannot be read, no serial is
+pinned: only a typed serial is followed (the status gives the one heard).
 
 ## Lifelong counters: never 0, no drop nor jump without you
 
@@ -110,7 +124,12 @@ counts every rise in full. So:
 - a value is checked against the last one accepted: not lower, and not more
   than 100 kWh per hour on average for a channel (100 pulses a second for a
   pulse counter), plus a small slack;
-- a **drop** (a GEM reset, a counter at its limit, a replaced CT) or a
+- the energy counters of the GEM wrap around at 2^40 watt-seconds (305,420
+  kWh) and the pulse counters at 2^24 pulses: a wrap (a counter near its top
+  that starts again near 0, the step through the top within the margin above)
+  is counted on, the offset kept in `/data` (a wrap while `/data` could not
+  keep the previous value shows as a drop, held);
+- a **drop** (a GEM reset, a replaced CT) or a
   **jump** is **held back**: the last accepted value is sent again, nothing
   is counted, the status lists the counter with the value held, and the hold
   is kept in `/data` across restarts. Time does not lift it, repeating the
@@ -131,8 +150,12 @@ widens nor narrows them.
 
 - The values are published when a packet arrives. Packets kept by the
   receiver while the integration was away are dropped when older than a
-  minute; a repeated or older packet (by the GEM's own seconds counter) is
-  dropped.
+  minute; a repeated packet, or an older one within the same connection
+  (by the GEM's own seconds counter), is dropped. A step back of the seconds
+  counter in a new connection is a restart of the GEM: its packets are taken
+  and the status says so for 10 minutes.
+- A write to `/data` that does not end within 5 seconds (a frozen disk) is
+  said in the status; the next writes wait behind it, one at most.
 - No packet for 2 minutes (or three intervals of the GEM, up to 15 minutes):
   the status says how long, the integration is not "connected", and nothing
   is made up.

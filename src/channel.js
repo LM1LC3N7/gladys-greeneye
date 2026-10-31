@@ -51,7 +51,7 @@ const sameProof = (a, b) => {
  * a line over MAX_LINE. Linear: each chunk is searched once for its line ends,
  * the pieces of a line are joined once.
  */
-function onJsonLines(socket, handler) {
+export function onJsonLines(socket, handler) {
   let parts = [];
   let size = 0;
   socket.setEncoding('utf8');
@@ -103,6 +103,7 @@ export function createChannelServer({
   onMessage = () => {},
 }) {
   const queue = [];
+  const sockets = new Set();
   let client;
   let server;
   let dropped = 0;
@@ -133,6 +134,8 @@ export function createChannelServer({
     start() {
       return new Promise((resolve, reject) => {
         server = createServer((socket) => {
+          sockets.add(socket);
+          socket.on('close', () => sockets.delete(socket));
           socket.setKeepAlive(true, 30_000);
           let state = 'challenged';
           const serverNonce = nonce();
@@ -185,6 +188,9 @@ export function createChannelServer({
       });
     },
     stop() {
+      // Every connection, the ones still in their handshake too: closing the
+      // server never waits on a socket left open.
+      for (const socket of sockets) socket.destroy();
       client?.destroy();
       return new Promise((resolve) => (server ? server.close(() => resolve()) : resolve()));
     },

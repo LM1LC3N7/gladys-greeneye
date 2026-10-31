@@ -24,3 +24,11 @@ the notes of the version's GitHub Release.
 - Lifelong counters never published at 0: a jump or a drop
   held back, kept in /data, accepted only by two clicks on "Accept the held
   counters".
+- The 5-byte energy counters (2^40 Ws) and the pulse counters (2^24) are
+  unwrapped (offset kept in /data): a wrap is counted on, never a drop.
+- What is seen and held is kept per serial number: a serial mistyped then
+  corrected keeps every hold; a guard without /data is built on a fresh read
+  of Gladys.
+- A restart of the GEM in a new connection is taken (and said), a hanging
+  /data write is said, an unreadable /data pins no serial, a cleared serial
+  field follows the first GEM heard again.

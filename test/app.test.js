@@ -248,8 +248,9 @@ test('a counter that jumps or drops is held, said, the last value sent again; ne
   }
   await ctx.g.next(7);
   assert.match(msg(ctx.gladys), /Counters held back/);
-  assert.ok(ctx.store.data.guards.ch1.held, 'kept in /data');
-  assert.equal(ctx.store.data.guards.ch1.held.direction, 'down');
+  const kept = ctx.store.data.serials[String(SERIAL)].guards.ch1;
+  assert.ok(kept.held, 'kept in /data');
+  assert.equal(kept.held.direction, 'down');
 });
 
 test('two clicks accept exactly the counters listed; one click, a click too soon or a change accept nothing', async (t) => {
@@ -340,8 +341,14 @@ test('a reference from /data dated in the future is taken as now (a normal rise 
   const store = memoryStore({
     token: 'k'.repeat(43),
     serial: SERIAL,
-    seen: { channels: [1] },
-    guards: { ch1: { last: { value: 100, at: clock.now() + 24 * 60 * MINUTE }, held: null } },
+    serials: {
+      [SERIAL]: {
+        seen: { channels: [1] },
+        guards: {
+          ch1: { last: { value: 100, at: clock.now() + 24 * 60 * MINUTE }, held: null },
+        },
+      },
+    },
   });
   const ctx = await setup(t, { store, clock });
   await ctx.createAll();
@@ -374,10 +381,11 @@ test('another GEM is refused and said; its serial typed, it is followed with its
     /Packets of GEM 2200001 refused: this integration follows GEM 1100603 \(the first one heard\)/,
   );
   assert.equal(ctx.store.data.serial, SERIAL);
-  assert.ok(ctx.store.data.guards.ch1, 'the counter of the first GEM kept');
+  assert.ok(ctx.store.data.serials[String(SERIAL)].guards.ch1, 'the counter of the first GEM kept');
   await ctx.gladys.fake.configUpdated({ ...CONFIG, gem_serial: '2200001' });
   assert.equal(ctx.store.data.serial, other);
-  assert.deepEqual(ctx.store.data.guards, {});
+  assert.deepEqual(ctx.store.data.serials[String(other)].guards, {});
+  assert.ok(ctx.store.data.serials[String(SERIAL)].guards.ch1, 'never wiped by a change of serial');
   await ctx.send(buildPacket({ serial: other, seconds: 6000, absolute: [5 * KWH] }));
   await ctx.advance(10 * SECOND);
   await ctx.send(buildPacket({ serial: other, seconds: 6010, absolute: [5 * KWH + 10_000] }));
@@ -518,13 +526,24 @@ test('getConfig failing in connected: retried without end, the status says it, t
   assert.doesNotMatch(msg(ctx.gladys), /could not be read/);
 });
 
-test('/data unreadable: never overwritten, said; values still published', async (t) => {
+test('/data unreadable: never overwritten, no pin learned, only a typed serial followed', async (t) => {
   const store = memoryStore({ token: 'k'.repeat(43), serial: SERIAL }, { unreadable: true });
-  const ctx = await running(t, { store });
+  const ctx = await setup(t, { store });
+  await ctx.gemUp();
+  const g = gem(ctx, steady);
+  await g.next(3);
   assert.equal(store.saves, 0);
   assert.match(msg(ctx.gladys), /cannot be read: it is never overwritten/);
+  assert.match(msg(ctx.gladys), /GEM 1100603 heard but not followed: \/data cannot be read/);
+  assert.equal(ctx.app.memory.serial, undefined, 'nothing pinned');
+  assert.equal(ctx.gladys.fake.discoveredDevices?.length ?? 0, 0);
+  await ctx.gladys.fake.configUpdated({ ...CONFIG, gem_serial: String(SERIAL) });
+  await g.next(2);
+  await ctx.createAll();
+  await g.next(2);
   await ctx.flush();
   assert.ok(ctx.gladys.fake.lastState(channelFeature(1, 'power')) > 0);
+  assert.equal(store.saves, 0);
 });
 
 test('/data frozen: the start and the saves never wait without bound', async (t) => {
@@ -670,4 +689,378 @@ test('the channel secret never reaches the logs, the status nor the Discovery', 
   assert.ok(!JSON.stringify(ctx.gladys.fake.connectionStatuses).includes(token));
   assert.ok(!JSON.stringify(ctx.gladys.fake.discoveredDevices).includes(token));
   assert.ok(!JSON.stringify(ctx.gladys.fake.states).includes(token));
+});
+
+// --- Review r1 -----------------------------------------------------------------------------
+
+/** A test clock whose wall clock can be moved (NTP) without touching the monotonic one. */
+function skewClock() {
+  const base = testClock();
+  const clock = {
+    skew: 0,
+    now: () => base.now() + clock.skew,
+    monotonic: base.monotonic,
+    timers: base.timers,
+    advance: (ms) => base.advance(ms),
+  };
+  return clock;
+}
+
+const click = async (ctx) =>
+  (await ctx.gladys.fake.action('accept_held_counters', {})).data.message;
+
+test('I1: an ABS counter wrapping at 2^40 Ws is counted on, never held, nothing lost; kept in /data', async (t) => {
+  const W40 = 2 ** 40;
+  const start = W40 - 30 * 20_000;
+  const store = memoryStore();
+  const shape = (s) => ({ absolute: [(start + (s - 1000) * 2000) % W40, 5] });
+  const ctx = await running(t, { store, shape, gem: { format: 'BIN32_ABS' } });
+  await ctx.g.next(45);
+  await ctx.flush();
+  const values = states(ctx.gladys, channelFeature(1, 'index'));
+  assert.ok(values.at(-1) > 305_419.89, String(values.at(-1)));
+  assert.ok(
+    values.every((v, i) => i === 0 || v >= values[i - 1]),
+    'never going down',
+  );
+  assert.doesNotMatch(msg(ctx.gladys), /held back/);
+  assert.equal(store.data.serials[String(SERIAL)].wraps['abs-1'].offset, W40);
+  // A restart keeps the offset: the index goes on.
+  await ctx.app.stop();
+  const devices = ctx.gladys.devices;
+  const again = await setup(t, { store, gladysOptions: { devices } });
+  await again.gemUp();
+  const g = gem(again, shape, { start: ctx.g.seconds, format: 'BIN32_ABS' });
+  await g.next(8);
+  await again.flush();
+  assert.ok(again.gladys.fake.lastState(channelFeature(1, 'index')) > values.at(-1));
+  assert.doesNotMatch(msg(again.gladys), /held back/);
+});
+
+test('I1: a NET channel whose absolute counter wraps keeps its consumption index (never frozen)', async (t) => {
+  const W40 = 2 ** 40;
+  const start = W40 - 30 * 50_000;
+  const produced = 200_000 * KWH;
+  const shape = (s) => ({
+    absolute: [(start + (s - 1000) * 5000) % W40],
+    polarized: [produced + (s - 1000) * 1000],
+  });
+  const ctx = await running(t, { shape });
+  await ctx.createAll();
+  await ctx.g.next(40);
+  await ctx.flush();
+  const values = states(ctx.gladys, channelFeature(1, 'index'));
+  const last = values.at(-1);
+  assert.ok(last > (start - produced) / KWH, String(last));
+  assert.ok(values.every((v, i) => i === 0 || v >= values[i - 1]));
+  assert.doesNotMatch(msg(ctx.gladys), /held back|0 or less/);
+  assert.ok(ctx.gladys.fake.lastState(channelFeature(1, 'production')) > 200_000);
+});
+
+test('I1: a pulse counter wrapping at 2^24 is counted on; a reset far from the top stays held', async (t) => {
+  const W24 = 2 ** 24;
+  let reset = false;
+  const shape = (s) => ({
+    ...steady(s),
+    pulses: [reset ? 3 : (W24 - 100 + (s - 1000)) % W24, 0, 0, 0],
+  });
+  const ctx = await running(t, { shape });
+  await ctx.createAll();
+  await ctx.g.next(21);
+  await ctx.flush();
+  assert.ok(ctx.gladys.fake.lastState(monitorFeature('pulse-1')) > W24);
+  assert.doesNotMatch(msg(ctx.gladys), /held back/);
+  reset = true;
+  await ctx.g.next(7);
+  assert.match(msg(ctx.gladys), /pulse counter 1: \d+ → \d+ pulses \(drop\)/);
+});
+
+test('I1: a NET counter reading 0 or less is said in the status, never published', async (t) => {
+  const shape = (s) => ({ absolute: [10 * KWH + (s - 1000) * 1000], polarized: [20 * KWH] });
+  const ctx = await running(t, { shape, config: { ...CONFIG, channels: '1' } });
+  await ctx.createAll();
+  await ctx.g.next(7);
+  await ctx.flush();
+  assert.match(msg(ctx.gladys), /Counter\(s\) reading 0 or less, not published: channel 1/);
+  assert.ok(states(ctx.gladys, channelFeature(1, 'index')).every((v) => v > 0));
+});
+
+test('I2: a mistyped serial then the right one keeps the hold; saving never accepts', async (t) => {
+  let offset = 0;
+  const shape = (s) => ({ absolute: [100 * KWH + (s - 1000) * 1000 + offset, 5] });
+  const ctx = await running(t, { shape });
+  offset = 50 * KWH;
+  await ctx.g.next(7);
+  assert.match(msg(ctx.gladys), /\(jump\)/);
+  await ctx.gladys.fake.configUpdated({ ...CONFIG, gem_serial: '1100604' });
+  await ctx.g.next(3);
+  await ctx.gladys.fake.configUpdated({ ...CONFIG, gem_serial: String(SERIAL) });
+  await ctx.g.next(14);
+  await ctx.flush();
+  assert.match(msg(ctx.gladys), /Counters held back[\s\S]*\(jump\)/);
+  assert.ok(states(ctx.gladys, channelFeature(1, 'index')).every((v) => v < 140));
+});
+
+test('I2: a guard without /data is built on a fresh read of Gladys; a failed read publishes nothing', async (t) => {
+  const ctx = await setup(t);
+  await ctx.gemUp();
+  const g = gem(ctx, steady);
+  await g.next(2);
+  await ctx.createAll();
+  t.mock.method(ctx.gladys, 'getDevices', async () => {
+    throw new Error('down');
+  });
+  await g.next(8);
+  await ctx.flush();
+  assert.deepEqual(states(ctx.gladys, channelFeature(1, 'index')), []);
+  // Gladys holds 130 kWh for this index: the fresh read gives it, the jump down is held.
+  const fresh = ctx.gladys.devices.map((d) => ({
+    ...d,
+    features: d.features.map((f) =>
+      f.external_id === channelFeature(1, 'index')
+        ? { ...f, last_value: 130, last_value_changed: new Date(ctx.clock.now()).toISOString() }
+        : f,
+    ),
+  }));
+  t.mock.method(ctx.gladys, 'getDevices', async () => fresh);
+  await g.next(7);
+  await ctx.flush();
+  assert.match(msg(ctx.gladys), /channel 1: 130 → 100\.\d+ kWh \(drop\)/);
+  assert.ok(states(ctx.gladys, channelFeature(1, 'index')).every((v) => v === 130));
+});
+
+test('I3 E9: the guard runs on the session clock: NTP moving the wall clock 10 h ahead takes no jump', async (t) => {
+  let offset = 0;
+  const clock = skewClock();
+  const shape = (s) => ({ absolute: [100 * KWH + (s - 1000) * 1000 + offset, 5] });
+  const ctx = await running(t, { shape, clock });
+  await ctx.flush();
+  clock.skew = 10 * 60 * MINUTE;
+  offset = 50 * KWH;
+  await ctx.g.next(7);
+  await ctx.flush();
+  assert.match(msg(ctx.gladys), /\(jump\)/);
+  assert.ok(states(ctx.gladys, channelFeature(1, 'index')).every((v) => v < 140));
+});
+
+test('I3 E8: a last value of Gladys dated in the future is taken as now', async (t) => {
+  const clock = testClock();
+  const future = new Date(clock.now() + 24 * 60 * MINUTE).toISOString();
+  const store = memoryStore({
+    token: 'k'.repeat(43),
+    serial: SERIAL,
+    serials: { [SERIAL]: { seen: { channels: [1] } } },
+  });
+  const first = await setup(t, { store, clock });
+  const devices = first.gladys.fake.discoveredDevices.map((d) => ({
+    ...d,
+    features: d.features.map((f) =>
+      f.external_id === channelFeature(1, 'index')
+        ? { ...f, last_value: 150, last_value_changed: future }
+        : f,
+    ),
+  }));
+  await first.app.stop();
+  const ctx = await setup(t, { store, clock, gladysOptions: { devices } });
+  await ctx.gemUp();
+  await ctx.send(buildPacket({ seconds: 10, absolute: [150 * KWH] }));
+  await ctx.advance(61 * SECOND);
+  // 1.5 kWh a minute later: within 100 kWh/h + 0.5 from now, not from a date ahead.
+  await ctx.send(buildPacket({ seconds: 71, absolute: [151.5 * KWH] }));
+  await ctx.flush();
+  assert.equal(ctx.gladys.fake.lastState(channelFeature(1, 'index')), 151.5);
+});
+
+test('I3 B3/B4/B5/B7: the second click takes nothing when the holds changed in any way', async (t) => {
+  let off = [0, 0];
+  const shape = (s) => ({
+    absolute: [100 * KWH + (s - 1000) * 1000 + off[0], 50 * KWH + (s - 1000) * 1000 + off[1]],
+  });
+  const ctx = await running(t, { shape });
+  // B3: one more counter held after the first click.
+  off = [5000 * KWH, 0];
+  await ctx.g.next(7);
+  assert.match((await click(ctx)).en, /accepts exactly: channel 1:/);
+  off = [5000 * KWH, 5000 * KWH];
+  await ctx.g.next(7);
+  assert.match((await click(ctx)).en, /changed since the first click/);
+  // Back to normal for both.
+  off = [0, 0];
+  await ctx.g.next(7);
+  assert.doesNotMatch(msg(ctx.gladys), /held back/);
+  // B4: the same jump, released and held again from another value.
+  off = [5000 * KWH, 0];
+  await ctx.g.next(7);
+  await click(ctx);
+  off = [0, 0];
+  await ctx.g.next(7);
+  off = [5000 * KWH, 0];
+  await ctx.g.next(7);
+  assert.match((await click(ctx)).en, /changed since the first click/);
+  // B5: the device deleted and created again between the clicks.
+  await click(ctx);
+  const ch1 = ctx.gladys.devices.find((d) => d.external_id === channelDevice(1));
+  await ctx.gladys.fake.deviceDeleted(ch1);
+  await ctx.gladys.fake.deviceCreated(ch1);
+  await ctx.g.next(7);
+  assert.match(msg(ctx.gladys), /channel 1: [\d.]+ → [\d.]+ kWh \(jump\)/);
+  assert.match((await click(ctx)).en, /changed since the first click/);
+  off = [0, 0];
+  await ctx.g.next(7);
+  assert.doesNotMatch(msg(ctx.gladys), /held back/);
+  // B7: a drop listed, then a jump of the same counter from the same value.
+  off = [-0.1 * KWH, 0];
+  await ctx.g.next(6);
+  assert.match((await click(ctx)).en, /channel 1: [\d.]+ → [\d.]+ kWh \(drop\)/);
+  off = [3 * KWH, 0];
+  await ctx.g.next(6);
+  assert.match(msg(ctx.gladys), /\(jump\)/);
+  await ctx.advance(2 * MINUTE);
+  assert.match((await click(ctx)).en, /changed since the first click/);
+});
+
+test('I3 A2/A7/A8/M4/M6: another session, a long gap, produced over total, out-of-range values', async (t) => {
+  const shape = (s) => ({
+    absolute: [10 * KWH + (s - 1000) * 1000],
+    polarized: [KWH + (s - 1000) * 100],
+    currents: [4],
+  });
+  const ctx = await running(t, { shape });
+  await ctx.flush();
+  const powers = () => states(ctx.gladys, channelFeature(1, 'power'));
+  const currents = () => states(ctx.gladys, channelFeature(1, 'current'));
+  let s = ctx.g.seconds;
+  // A2: a packet of another session (fresh seconds, its own current): ignored.
+  await ctx.send(buildPacket({ seconds: s, ...shape(s), currents: [33] }), { id: 99 });
+  await ctx.flush();
+  assert.ok(!currents().includes(33), currents().join());
+  // A7: two hours later (GEM seconds), 3 kW on average: no power over the gap.
+  let before = powers().length;
+  s += 7200;
+  let abs = 10 * KWH + (s - 1000) * 1000 + 7200 * 2000;
+  let pol = KWH + (s - 1000) * 100;
+  await ctx.send(buildPacket({ seconds: s, absolute: [abs], polarized: [pol], currents: [5] }));
+  await ctx.flush();
+  assert.ok(currents().includes(5), 'the packet itself is taken');
+  assert.equal(powers().length, before, powers().join());
+  // A8: the produced energy grows more than the total: no power.
+  before = powers().length;
+  s += 10;
+  abs += 1000;
+  pol += 10_000;
+  await ctx.send(buildPacket({ seconds: s, absolute: [abs], polarized: [pol], currents: [6] }));
+  await ctx.flush();
+  assert.ok(currents().includes(6));
+  assert.equal(powers().length, before, powers().join());
+  // M4/M6: 500 A, 0 V: not values.
+  s += 10;
+  abs += 20_000;
+  await ctx.send(
+    buildPacket({ seconds: s, voltage: 0, absolute: [abs], polarized: [pol], currents: [500] }),
+  );
+  await ctx.flush();
+  assert.ok(!currents().includes(500));
+  assert.ok(!states(ctx.gladys, monitorFeature('voltage')).includes(0));
+  assert.ok(powers().includes(2000), 'the next packet in a row has its power');
+});
+
+test('I3 A4: nothing is pinned before the configuration is read', async (t) => {
+  const store = memoryStore();
+  const ctx = await setup(t, {
+    store,
+    connect: false,
+    config: { ...CONFIG, gem_serial: '2200001' },
+  });
+  ctx.channel().up(null);
+  await ctx.gemUp();
+  await ctx.send(buildPacket({ seconds: 10, absolute: [1] }));
+  await ctx.gladys.connect();
+  await settle(20);
+  assert.equal(ctx.app.memory.serial, 2_200_001);
+  assert.ok(!Object.hasOwn(store.data.serials ?? {}, String(SERIAL)));
+});
+
+test('I3 M5: a feature of a created device is kept when the Discovery no longer builds it', async (t) => {
+  const ctx = await running(t, {
+    config: { ...CONFIG, temperature_unit: 'celsius' },
+    shape: (s) => ({ ...steady(s), temperatures: [20, null, null, null, null, null, null, null] }),
+  });
+  await ctx.createAll();
+  await ctx.gladys.fake.configUpdated({ ...CONFIG, temperature_unit: 'off' });
+  const monitor = ctx.gladys.fake.discoveredDevices[0];
+  assert.ok(monitor.features.some((f) => f.external_id === monitorFeature('temp-1')));
+});
+
+test('m1: a GEM restarting a few minutes after its start keeps sending values, said', async (t) => {
+  const ctx = await running(t);
+  await ctx.flush();
+  // Restarted: its seconds counter starts again below the last one, in a new connection.
+  ctx.channel().emit('message', { type: 'session', state: 'down', session: 1, at: ctx.at() });
+  await ctx.gemUp(2);
+  const g = gem(ctx, steady, { start: 1010 });
+  await g.next(3);
+  await ctx.flush();
+  assert.equal(status(ctx.gladys).connected, true);
+  assert.match(msg(ctx.gladys), /The GEM restarted/);
+  assert.equal(ctx.gladys.fake.lastState(channelFeature(1, 'power')), 1000);
+  // In the same connection, a step back is an old packet: dropped.
+  await ctx.send(buildPacket({ seconds: 1015, ...steady(1015), currents: [44] }));
+  await ctx.flush();
+  assert.ok(!states(ctx.gladys, channelFeature(1, 'current')).includes(44));
+});
+
+test('m3: a save hanging on /data is said in the status after 5 s', async (t) => {
+  const store = memoryStore();
+  const ctx = await running(t, { store });
+  let release;
+  store.hold = new Promise((resolve) => (release = resolve));
+  ctx.app.saveMemory();
+  await ctx.advance(6 * SECOND);
+  assert.match(msg(ctx.gladys), /\/data could not be written/);
+  release();
+  await settle(20);
+  await ctx.advance(SECOND);
+  assert.doesNotMatch(msg(ctx.gladys), /could not be written/);
+});
+
+test('m4: the serial field cleared, the first GEM heard is followed again and said so', async (t) => {
+  const ctx = await running(t, { config: { ...CONFIG, gem_serial: '1100604' } });
+  assert.match(msg(ctx.gladys), /follows GEM 1100604 \(the serial number typed\)/);
+  await ctx.gladys.fake.configUpdated({ ...CONFIG });
+  await ctx.g.next(2);
+  assert.equal(ctx.app.memory.serial, SERIAL);
+  assert.equal(ctx.app.memory.typed, false);
+  assert.doesNotMatch(msg(ctx.gladys), /refused/);
+});
+
+test('I1: a reset of a counter near its top stays a drop (not taken for a wrap)', async (t) => {
+  const W40 = 2 ** 40;
+  let reset = false;
+  const shape = (s) => ({ absolute: [reset ? KWH : W40 - 1000 * KWH + (s - 1000) * 1000, 5] });
+  const ctx = await running(t, { shape, gem: { format: 'BIN32_ABS' } });
+  reset = true;
+  await ctx.g.next(7);
+  assert.match(msg(ctx.gladys), /channel 1: [\d.]+ → 1 kWh \(drop\)/);
+});
+
+test('I2: switching serials and back keeps the last value accepted (a lower value is a drop)', async (t) => {
+  let off = 0;
+  const shape = (s) => ({ absolute: [100 * KWH + (s - 1000) * 1000 + off, 5] });
+  const ctx = await running(t, { shape });
+  // A rise accepted after the last write of /data (written every 10 min only).
+  off = 1 * KWH;
+  await ctx.g.next(7);
+  await ctx.flush();
+  const top = ctx.gladys.fake.lastState(channelFeature(1, 'index'));
+  await ctx.gladys.fake.configUpdated({ ...CONFIG, gem_serial: '1100604' });
+  await ctx.gladys.fake.configUpdated({ ...CONFIG, gem_serial: String(SERIAL) });
+  // Back under the last value accepted, above the one /data had before.
+  off = 0.3 * KWH;
+  await ctx.g.next(7);
+  await ctx.flush();
+  assert.match(msg(ctx.gladys), /channel 1: [\d.]+ → [\d.]+ kWh \(drop\)/);
+  assert.ok(
+    states(ctx.gladys, channelFeature(1, 'index')).every((v, i, a) => i === 0 || v >= a[i - 1]),
+  );
+  assert.ok(ctx.gladys.fake.lastState(channelFeature(1, 'index')) >= top);
 });

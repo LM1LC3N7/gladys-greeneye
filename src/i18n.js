@@ -114,6 +114,22 @@ export const STATUS = {
       ` Packets of GEM ${seen} refused: this integration follows GEM ${expected}${typed ? ' (the serial number typed)' : ' (the first one heard)'}. If the monitor was replaced, type ${seen} in "Serial number of the GEM".`,
       ` Paquets du GEM ${seen} refusés : cette intégration suit le GEM ${expected}${typed ? ' (le numéro de série saisi)' : ' (le premier entendu)'}. Si le moniteur a été remplacé, saisissez ${seen} dans « Numéro de série du GEM ».`,
     ),
+  unpinned: (serial) =>
+    t(
+      ` GEM ${serial} heard but not followed: /data cannot be read, so no serial number can be kept; type it in "Serial number of the GEM".`,
+      ` GEM ${serial} entendu mais non suivi : /data est illisible, aucun numéro de série ne peut y être gardé ; saisissez-le dans « Numéro de série du GEM ».`,
+    ),
+  restarted: t(
+    ' The GEM restarted (its seconds counter went back): the power starts again from the next packet.',
+    ' Le GEM a redémarré (son compteur de secondes a reculé) : la puissance repart au paquet suivant.',
+  ),
+  nonPositive: (keys) => {
+    const names = keys.map(counterName);
+    return t(
+      ` Counter(s) reading 0 or less, not published: ${names.map((n) => n.en).join(', ')} (on a NET channel, the polarized counter must count the production: check the direction of the CT).`,
+      ` Compteur(s) à 0 ou moins, non publié(s) : ${names.map((n) => n.fr).join(', ')} (sur un canal NET, le compteur polarisé doit compter la production : vérifiez le sens de la pince).`,
+    );
+  },
   serialInvalid: t(
     ' The serial number typed is not valid (1 to 8 digits): ignored.',
     ' Le numéro de série saisi n’est pas valide (1 à 8 positions, de 0 à 9) : ignoré.',

@@ -6,7 +6,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { connect } from 'node:net';
+import { connect, createServer } from 'node:net';
 import { ChannelClient } from '../src/channel.js';
 import { startLinkService } from '../src/link/service.js';
 import { buildPacket, capture, fakeGem } from './fixtures/gem.js';
@@ -186,4 +186,142 @@ test('never more than 4 sockets open: a fifth is closed before it becomes a sess
   await new Promise((resolve) => setTimeout(resolve, 50));
   assert.equal(messages.filter((m) => m.type === 'session' && m.state === 'up').length, 4);
   assert.equal(sockets[4].destroyed, true);
+});
+
+test('L7: data of a replaced session is never read (the old socket closed at once)', async (t) => {
+  const { link, messages } = await start(t);
+  const fake = () => {
+    const socket = new EventEmitter();
+    socket.remoteAddress = '127.0.0.1';
+    socket.destroyed = false;
+    socket.destroy = () => (socket.destroyed = true);
+    socket.setKeepAlive = () => {};
+    return socket;
+  };
+  const first = fake();
+  const second = fake();
+  link.server.emit('connection', first);
+  link.server.emit('connection', second);
+  assert.equal(first.destroyed, true);
+  // A late chunk of the replaced socket (already in the kernel buffer).
+  first.emit('data', buildPacket({ seconds: 1 }));
+  second.emit('data', buildPacket({ seconds: 2 }));
+  await until(() => messages.some((m) => m.type === 'packet'));
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.deepEqual(
+    messages.filter((m) => m.type === 'packet').map((m) => m.session),
+    [2],
+  );
+});
+
+test('L8: a GEM address that is not an IP refuses every connection', async (t) => {
+  const { link, messages } = await start(t, { GEM_ADDRESS: 'not-an-ip' });
+  const gem = await fakeGem(link.port);
+  gem.send(buildPacket());
+  await until(() => gem.closed);
+  await until(() => messages.some((m) => m.type === 'refused'));
+  assert.ok(!messages.some((m) => m.type === 'packet' || m.type === 'session'));
+});
+
+test('C2: the main container accepts nothing from a receiver that does not prove the secret', async (t) => {
+  const open = new Set();
+  const server = createServer((socket) => {
+    open.add(socket);
+    socket.write(`${JSON.stringify({ type: 'challenge', nonce: 'a'.repeat(32) })}\n`);
+    socket.on('data', () => {
+      socket.write(`${JSON.stringify({ type: 'ready', proof: 'f'.repeat(64) })}\n`);
+      socket.write(`${JSON.stringify({ type: 'packet', session: 1, hex: 'feff' })}\n`);
+    });
+    socket.on('error', () => {});
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => {
+    // Never waits on a connection left open (a broken client must fail, not hang).
+    for (const socket of open) socket.destroy();
+    return new Promise((resolve) => server.close(resolve));
+  });
+  const client = new ChannelClient({
+    host: '127.0.0.1',
+    port: server.address().port,
+    token: TOKEN,
+    logger: quiet,
+    delays: [10_000],
+  });
+  let up = false;
+  const got = [];
+  client.on('up', () => (up = true));
+  client.on('message', (m) => got.push(m));
+  client.start();
+  t.after(() => client.stop());
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.equal(up, false);
+  assert.deepEqual(got, []);
+});
+
+test('C3: a receiver without a secret accepts no client, even one proving the empty secret', async (t) => {
+  const { createChannelServer, proof } = await import('../src/channel.js');
+  const server = createChannelServer({ port: 0, host: '127.0.0.1', token: '', logger: quiet });
+  await server.start();
+  t.after(() => server.stop());
+  const raw = connect({ host: '127.0.0.1', port: server.port });
+  raw.on('error', () => {});
+  const lines = [];
+  let buffer = '';
+  raw.setEncoding('utf8');
+  raw.on('data', (chunk) => {
+    buffer += chunk;
+    let end;
+    while ((end = buffer.indexOf('\n')) >= 0) {
+      lines.push(JSON.parse(buffer.slice(0, end)));
+      buffer = buffer.slice(end + 1);
+      if (lines.length === 1) {
+        const nonce = 'b'.repeat(32);
+        raw.write(
+          `${JSON.stringify({ type: 'hello', nonce, proof: proof('', 'client', lines[0].nonce, nonce) })}\n`,
+        );
+      }
+    }
+  });
+  await until(() => raw.destroyed || raw.readableEnded || lines.length > 1, 2000).catch(() => {});
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.ok(!lines.some((l) => l.type === 'ready'));
+  assert.equal(server.connected, false);
+  raw.destroy();
+});
+
+test('C4: a line longer than 64 KiB in one chunk drops the socket, never handed over', async () => {
+  const { onJsonLines } = await import('../src/channel.js');
+  const socket = new EventEmitter();
+  socket.setEncoding = () => {};
+  socket.destroyed = false;
+  socket.destroy = () => (socket.destroyed = true);
+  const got = [];
+  onJsonLines(socket, (o) => got.push(o));
+  socket.emit('data', `${JSON.stringify({ type: 'x', pad: 'a'.repeat(70_000) })}\n`);
+  assert.equal(socket.destroyed, true);
+  assert.deepEqual(got, []);
+  const small = new EventEmitter();
+  small.setEncoding = () => {};
+  small.destroy = () => (small.destroyed = true);
+  onJsonLines(small, (o) => got.push(o));
+  small.emit('data', '{"type":"a"}\n{"type":"b"}\n');
+  assert.deepEqual(
+    got.map((o) => o.type),
+    ['a', 'b'],
+  );
+});
+
+test('the receiver stops at once, connections still in their handshake included', async () => {
+  const { createChannelServer } = await import('../src/channel.js');
+  const server = createChannelServer({ port: 0, host: '127.0.0.1', token: TOKEN, logger: quiet });
+  await server.start();
+  const raw = connect({ host: '127.0.0.1', port: server.port });
+  raw.on('error', () => {});
+  await new Promise((resolve) => raw.once('data', resolve));
+  const stopped = await Promise.race([
+    server.stop().then(() => 'stopped'),
+    new Promise((resolve) => setTimeout(() => resolve('hanging'), 2000)),
+  ]);
+  raw.destroy();
+  assert.equal(stopped, 'stopped');
 });

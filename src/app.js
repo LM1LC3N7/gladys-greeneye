@@ -38,7 +38,7 @@ import { createHash } from 'node:crypto';
 import { createLogger } from '@gladysassistant/integration-sdk';
 import { ChannelClient } from './channel.js';
 import { linkEnv, normalizeConfig } from './config.js';
-import { BOUNDS, GUARDS, LIMITS, LINK, TIMINGS } from './constants.js';
+import { BOUNDS, GUARDS, HOUR, LIMITS, LINK, TIMINGS } from './constants.js';
 import { PacketError, WRAP, parsePacket } from './gem/packets.js';
 import { CounterGuard } from './guard.js';
 import { ACCEPT, STATUS } from './i18n.js';
@@ -57,7 +57,9 @@ import {
 import { StatePublisher } from './publisher.js';
 import {
   GUARD_KEY,
+  MAX_SERIALS,
   emptyMemory,
+  emptyUnit,
   fileStore,
   isToken,
   newToken,
@@ -144,7 +146,15 @@ export class GreenEyeApp {
     /** key -> { guard } (src/guard.js), built once the device exists in Gladys. */
     this.guards = new Map();
     this.savedHeld = '';
+    this.savedNonPositive = '';
     this.guardAdded = false;
+    this.wrapped = false;
+    this.countersBusy = false;
+    this.lastCounters = undefined;
+    /** Counters reading 0 or below (never published), said in the status. */
+    this.nonPositive = new Set();
+    this.unpinned = undefined;
+    this.restartedAt = undefined;
     this.lastGuardSave = -Infinity;
     this.pendingAccept = undefined;
     this.saving = undefined;
@@ -217,7 +227,12 @@ export class GreenEyeApp {
     this.channel = undefined;
     // The guards as they are now, for the next start (bounded: never holds the shutdown).
     this.keepGuards();
-    return this.saveMemory().then(() => undefined);
+    // Bounded on the real clock too: a stop never waits on a frozen /data,
+    // whatever timers were injected.
+    return Promise.race([
+      this.saveMemory(),
+      new Promise((resolve) => setTimeout(resolve, TIMINGS.dataTimeout).unref?.()),
+    ]).then(() => undefined);
   }
 
   later(name, delay, fn) {
@@ -262,12 +277,23 @@ export class GreenEyeApp {
     this.saving = run;
     run.then((ok) => {
       if (this.saving === run) this.saving = undefined;
-      if (this.unsaved === ok) {
-        this.unsaved = !ok;
-        this.updateStatus();
-      }
+      this.setUnsaved(!ok);
     });
-    return within(run, TIMINGS.dataTimeout, this.timers, false);
+    return within(run, TIMINGS.dataTimeout, this.timers, TIMEOUT).then((result) => {
+      // A write still hanging (a frozen /data) is said now; the next saves wait
+      // behind it, one at most (saveAgain), never piling up.
+      if (result === TIMEOUT) {
+        this.setUnsaved(true);
+        return false;
+      }
+      return result;
+    });
+  }
+
+  setUnsaved(unsaved) {
+    if (this.unsaved === unsaved) return;
+    this.unsaved = unsaved;
+    this.updateStatus();
   }
 
   // --- Gladys ---------------------------------------------------------------------------
@@ -324,10 +350,14 @@ export class GreenEyeApp {
     this.config = normalizeConfig(raw);
     this.configRead = true;
     const typed = this.config.serial;
-    if (typed !== null && typed !== this.memory.serial) {
-      // Another GEM typed: its own devices, nothing of the previous one.
+    if (typed !== null && (typed !== this.memory.serial || !this.memory.typed)) {
+      // Another GEM typed: its own devices; what was kept for the other one stays in /data.
       this.logger.info(`Following GEM ${typed} (typed in the configuration)`);
-      this.adoptSerial(typed);
+      this.adoptSerial(typed, { typed: true });
+    } else if (typed === null && this.memory.typed) {
+      // The field cleared: the first GEM heard is followed again.
+      this.logger.info('Serial number cleared: following the first GEM heard');
+      this.adoptSerial(undefined, { typed: false });
     }
     if (this.config.problem) {
       // Nothing listens without a valid address of the GEM, not even a link
@@ -345,20 +375,47 @@ export class GreenEyeApp {
     await this.updateStatus();
   }
 
-  /** Follows `serial` from now: what was seen and held for another GEM is forgotten. */
-  adoptSerial(serial) {
-    const changed = this.memory.serial !== undefined;
+  /**
+   * Follows `serial` from now (undefined: the next GEM heard). What was seen,
+   * held and unwrapped for each serial stays in /data under its serial: a
+   * mistyped serial then the right one keeps every hold (review r1, I2).
+   */
+  adoptSerial(serial, { typed = false } = {}) {
+    // The counters of the GEM followed so far, as they are, before switching.
+    this.keepGuards();
     this.memory.serial = serial;
-    if (changed) {
-      for (const set of Object.values(this.memory.seen)) set.clear();
-      this.memory.guards = {};
-    }
+    this.memory.typed = serial !== undefined && typed;
+    if (serial !== undefined) this.unit(serial, { touch: true });
     this.guards.clear();
     this.pendingAccept = undefined;
     this.previous = undefined;
+    this.lastCounters = undefined;
     this.otherSerial = undefined;
+    this.unpinned = undefined;
     this.savedHeld = '';
+    this.lastIndexAt = undefined;
+    this.nonPositive.clear();
     this.saveMemory();
+  }
+
+  /**
+   * What is kept for `serial` (the one followed by default); `touch` makes
+   * it the most recent of the MAX_SERIALS kept. Without a serial, an empty
+   * one that is never stored.
+   */
+  unit(serial = this.memory.serial, { touch = false } = {}) {
+    if (serial === undefined) return emptyUnit();
+    let unit = this.memory.serials.get(serial);
+    if (!unit || touch) {
+      unit ??= emptyUnit();
+      this.memory.serials.delete(serial);
+      this.memory.serials.set(serial, unit);
+      while (this.memory.serials.size > MAX_SERIALS) {
+        const oldest = this.memory.serials.keys().next().value;
+        this.memory.serials.delete(oldest);
+      }
+    }
+    return unit;
   }
 
   refreshCreated() {
@@ -395,7 +452,7 @@ export class GreenEyeApp {
   }
 
   async publishDiscovery() {
-    const devices = buildDevices(this.gladys, this.memory.serial, this.memory.seen, {
+    const devices = buildDevices(this.gladys, this.memory.serial, this.unit().seen, {
       config: this.config,
       created: this.created,
     });
@@ -448,7 +505,7 @@ export class GreenEyeApp {
       text = STATUS.connected({
         serial: this.memory.serial,
         format: this.memory.format ?? '?',
-        channels: shownChannels(this.config, this.memory.seen).length,
+        channels: shownChannels(this.config, this.unit().seen).length,
       });
     } else if (since !== undefined && this.memory.serial !== undefined) {
       text = STATUS.stale({ serial: this.memory.serial, since });
@@ -465,12 +522,17 @@ export class GreenEyeApp {
         STATUS.otherSerial(
           this.otherSerial,
           this.config.serial ?? this.memory.serial,
-          this.config.serial !== null,
+          this.memory.typed,
         ),
       );
     }
     if (this.refused) extras.push(STATUS.refused(this.refused.from, this.refused.count));
     if (this.junk.ecm > 0 || this.junk.malformed > 0) extras.push(STATUS.junk(this.junk));
+    if (this.unpinned !== undefined) extras.push(STATUS.unpinned(this.unpinned));
+    if (this.restartedAt !== undefined && mono - this.restartedAt < TIMINGS.restartNotice) {
+      extras.push(STATUS.restarted);
+    }
+    if (this.nonPositive.size > 0) extras.push(STATUS.nonPositive([...this.nonPositive].sort()));
     if (this.config.serialInvalid) extras.push(STATUS.serialInvalid);
     if (this.config.channelsInvalid) extras.push(STATUS.channelsInvalid);
     if (this.config.temperatureUnit === 'off') extras.push(STATUS.temperaturesOff);
@@ -660,13 +722,27 @@ export class GreenEyeApp {
     if (previous) {
       const back = previous.seconds - packet.seconds;
       if (back === 0) return; // the same packet again
-      if (back > 0 && back <= TIMINGS.staleSeconds) return; // older than the last one taken
-      seconds = delta(packet.seconds, previous.seconds, WRAP.seconds);
-      // A GEM restarted, a long gap: a new start, no power over it.
-      if (seconds * 1000 > TIMINGS.powerMaxGap) seconds = undefined;
+      const sameSession = this.previous.session === this.session.id;
+      if (back > 0 && back <= TIMINGS.staleSeconds && sameSession) {
+        // Older than the last one taken, in the same connection (TCP keeps the
+        // order: only a misbehaving sender does this).
+        return;
+      }
+      if (back > 0 && back <= TIMINGS.staleSeconds) {
+        // Back in a new connection: the GEM restarted (its counter starts again).
+        this.restartedAt = mono;
+        this.logger.info('The GEM restarted (its seconds counter went back)');
+        seconds = undefined;
+      } else {
+        seconds = delta(packet.seconds, previous.seconds, WRAP.seconds);
+        // A GEM restarted, a long gap: a new start, no power over it.
+        if (seconds * 1000 > TIMINGS.powerMaxGap) seconds = undefined;
+      }
     }
     if (seconds !== undefined) this.interval = seconds * 1000;
-    this.previous = { packet, mono };
+    this.previous = { packet, mono, session: this.session.id };
+    // The 5-byte and 3-byte counters, unwrapped (review r1, I1).
+    const counters = this.unwrap(packet, this.sessionNow());
     const firstPacket = this.lastPacketMono === undefined;
     this.lastPacketMono = mono;
     let changed = false;
@@ -674,8 +750,8 @@ export class GreenEyeApp {
       this.memory.format = packet.format;
       changed = true;
     }
-    changed = this.learn(packet, previous, seconds) || changed;
-    this.publishPacket(packet, previous, seconds, mono);
+    changed = this.learn(packet, counters, seconds) || changed;
+    this.publishPacket(packet, previous, seconds, mono, counters);
     if (changed) {
       this.saveMemory();
       this.publishDiscovery();
@@ -688,6 +764,14 @@ export class GreenEyeApp {
     const expected = this.config.serial ?? this.memory.serial;
     if (expected === undefined) {
       if (!this.configRead) return false; // the serial typed is not known yet
+      if (this.unreadable) {
+        // /data unreadable: no new pin (it could not be kept); only a typed serial is followed.
+        if (this.unpinned !== packet.serial) {
+          this.unpinned = packet.serial;
+          this.updateStatus();
+        }
+        return false;
+      }
       this.logger.info(`Following GEM ${packet.serial} (the first one heard)`);
       this.adoptSerial(packet.serial);
       return true;
@@ -713,8 +797,11 @@ export class GreenEyeApp {
    * channel, a plausible temperature, a pulse counter that rose. True when
    * something new was seen.
    */
-  learn(packet, previous, seconds) {
-    const seen = this.memory.seen;
+  learn(packet, counters, seconds) {
+    const seen = this.unit().seen;
+    const before = this.lastCounters;
+    this.lastCounters = counters;
+    const previous = seconds !== undefined ? before : undefined;
     let changed = false;
     const add = (set, n) => {
       if (!set.has(n)) {
@@ -722,14 +809,14 @@ export class GreenEyeApp {
         changed = true;
       }
     };
-    if (previous && seconds !== undefined && previous.channels === packet.channels) {
+    if (previous && previous.absolute.length === counters.absolute.length) {
       const most = Math.max(Math.abs(BOUNDS.power.min), BOUNDS.power.max) * seconds;
       for (let i = 0; i < packet.channels; i += 1) {
-        const rose = packet.absolute[i] - previous.absolute[i];
+        const rose = counters.absolute[i] - previous.absolute[i];
         if (rose > 0 && rose <= most) add(seen.channels, i + 1);
       }
-      for (let i = 0; i < packet.pulses.length; i += 1) {
-        const rose = packet.pulses[i] - previous.pulses[i];
+      for (let i = 0; i < counters.pulses.length; i += 1) {
+        const rose = counters.pulses[i] - previous.pulses[i];
         if (rose > 0 && rose <= (GUARDS.pulses.perHour * seconds) / 3600 + 1) {
           add(seen.pulses, i + 1);
         }
@@ -737,7 +824,7 @@ export class GreenEyeApp {
     }
     if (packet.net) {
       for (const n of shownChannels(this.config, seen)) {
-        if (n <= packet.channels && packet.polarized[n - 1] > 0) add(seen.produced, n);
+        if (n <= packet.channels && counters.polarized[n - 1] > 0) add(seen.produced, n);
       }
     }
     if (this.config.temperatureUnit !== 'off') {
@@ -753,7 +840,7 @@ export class GreenEyeApp {
     if (this.createdFeatures.has(featureId)) this.publisher.push(featureId, state);
   }
 
-  publishPacket(packet, previous, seconds, mono) {
+  publishPacket(packet, previous, seconds, mono, counters) {
     const serial = this.memory.serial;
     const monitor = deviceIds(this.gladys, monitorSlug(serial));
     if (plausibleVoltage(packet.voltage)) {
@@ -767,7 +854,7 @@ export class GreenEyeApp {
     }
     const powerOk =
       previous && seconds !== undefined && seconds > 0 && previous.channels === packet.channels;
-    for (const n of shownChannels(this.config, this.memory.seen)) {
+    for (const n of shownChannels(this.config, this.unit().seen)) {
       if (n > packet.channels) continue;
       const i = n - 1;
       const ids = deviceIds(this.gladys, channelSlug(serial, n));
@@ -789,9 +876,17 @@ export class GreenEyeApp {
       }
     }
     if (this.lastIndexAt !== undefined && mono < this.lastIndexAt) this.lastIndexAt = undefined;
-    if (this.lastIndexAt === undefined || mono - this.lastIndexAt >= TIMINGS.indexInterval) {
+    if (
+      !this.countersBusy &&
+      (this.lastIndexAt === undefined || mono - this.lastIndexAt >= TIMINGS.indexInterval)
+    ) {
       this.lastIndexAt = mono;
-      this.publishCounters(packet);
+      this.countersBusy = true;
+      this.publishCounters(packet, counters)
+        .catch((err) => this.logger.warn(`Checking the counters failed: ${err.message}`))
+        .finally(() => {
+          this.countersBusy = false;
+        });
     }
   }
 
@@ -810,21 +905,67 @@ export class GreenEyeApp {
     return deviceIds(this.gladys, monitorSlug(serial)).feature(`pulse-${m?.[1]}`);
   }
 
-  /** The value of each counter of a packet: [key, value, limits]. */
-  countersOf(packet) {
+  /**
+   * The raw counters of a packet unwrapped, on the session clock `at`: the
+   * absolute and polarized energies (5 bytes, 2^40 Ws) and the pulses (3
+   * bytes, 2^24). A raw value that goes back by more than half of its range
+   * while the forward step through the top fits the margin of the counter
+   * since its last value is a wrap: the counter's offset grows by the range
+   * (kept in /data). Any other step back (a reset, a replaced CT) stays a
+   * drop, for the guard to hold.
+   */
+  unwrap(packet, at) {
+    const wraps = this.unit().wraps;
+    let changed = false;
+    const one = (key, raw, range, perHour, slack) => {
+      const entry = Object.hasOwn(wraps, key) ? wraps[key] : undefined;
+      if (!entry) {
+        wraps[key] = { raw, offset: 0, at };
+        return raw;
+      }
+      if (raw < entry.raw && entry.raw - raw > range / 2) {
+        const forward = raw + range - entry.raw;
+        const margin = (perHour * Math.max(0, at - entry.at)) / HOUR + slack;
+        if (forward <= margin) {
+          entry.offset += range;
+          changed = true;
+          this.logger.info(`GEM counter ${key} wrapped around: counted on`);
+        }
+      }
+      entry.raw = raw;
+      entry.at = at;
+      return raw + entry.offset;
+    };
+    const ws = [GUARDS.energy.perHour * WS_PER_KWH, GUARDS.energy.slack * WS_PER_KWH];
+    const out = {
+      absolute: packet.absolute.map((raw, i) => one(`abs-${i + 1}`, raw, WRAP.ws, ...ws)),
+      polarized: packet.net
+        ? packet.polarized.map((raw, i) => one(`pol-${i + 1}`, raw, WRAP.ws, ...ws))
+        : null,
+      pulses: packet.pulses.map((raw, i) =>
+        one(`pulse-${i + 1}`, raw, WRAP.pulses, GUARDS.pulses.perHour, GUARDS.pulses.slack),
+      ),
+    };
+    if (changed) this.wrapped = true;
+    return out;
+  }
+
+  /** The value of each counter of a packet (unwrapped): [key, value, limits]. */
+  countersOf(packet, counters) {
     const out = [];
-    for (const n of shownChannels(this.config, this.memory.seen)) {
+    const seen = this.unit().seen;
+    for (const n of shownChannels(this.config, seen)) {
       if (n > packet.channels) continue;
       const i = n - 1;
-      const produced = packet.net ? packet.polarized[i] : 0;
+      const produced = counters.polarized ? counters.polarized[i] : 0;
       // Consumed = absolute - produced (NET); ABS: the absolute counter.
-      out.push([`ch${n}`, round((packet.absolute[i] - produced) / WS_PER_KWH, 3), GUARDS.energy]);
-      if (packet.net && this.memory.seen.produced.has(n)) {
+      out.push([`ch${n}`, round((counters.absolute[i] - produced) / WS_PER_KWH, 3), GUARDS.energy]);
+      if (counters.polarized && seen.produced.has(n)) {
         out.push([`ch${n}-prod`, round(produced / WS_PER_KWH, 3), GUARDS.energy]);
       }
     }
-    for (const n of this.memory.seen.pulses) {
-      out.push([`pulse-${n}`, packet.pulses[n - 1], GUARDS.pulses]);
+    for (const n of seen.pulses) {
+      out.push([`pulse-${n}`, counters.pulses[n - 1], GUARDS.pulses]);
     }
     return out;
   }
@@ -837,16 +978,17 @@ export class GreenEyeApp {
    * reference "in the future" never shrinks the margin of the next rise to
    * nothing, a wall clock moved by NTP during this life changes nothing.
    */
-  guardOf(key, featureId, limits) {
+  guardOf(key, featureId, limits, devices = [...this.created.values()]) {
     let entry = this.guards.get(key);
     if (!entry) {
-      const device = [...this.created.values()].find((d) =>
-        (d.features ?? []).some((f) => f.external_id === featureId),
+      const device = devices.find((d) =>
+        (d?.features ?? []).some((f) => f.external_id === featureId),
       );
       const sessionNow = this.sessionNow();
       const bounded = (ref) =>
         ref && Number.isFinite(ref.at) ? { ...ref, at: Math.min(ref.at, sessionNow) } : ref;
-      const saved = Object.hasOwn(this.memory.guards, key) ? this.memory.guards[key] : undefined;
+      const guards = this.unit().guards;
+      const saved = Object.hasOwn(guards, key) ? guards[key] : undefined;
       const kept = saved ? { last: bounded(saved.last), held: bounded(saved.held) } : undefined;
       const guard = new CounterGuard(
         limits,
@@ -861,11 +1003,42 @@ export class GreenEyeApp {
     return entry.guard;
   }
 
-  publishCounters(packet) {
-    for (const [key, value, limits] of this.countersOf(packet)) {
-      const featureId = this.counterFeatureId(key);
-      if (!this.createdFeatures.has(featureId)) continue;
-      const guard = this.guardOf(key, featureId, limits);
+  /**
+   * The counters, once a minute. A guard built without what /data kept is
+   * built on a FRESH read of the devices from Gladys (never the cache of the
+   * last connection, which may lack the last value): when that read fails,
+   * nothing is checked nor published this round (review r1, I2).
+   */
+  async publishCounters(packet, counters) {
+    const serial = this.memory.serial;
+    const generation = this.generation;
+    const todo = this.countersOf(packet, counters)
+      .map(([key, value, limits]) => [key, value, limits, this.counterFeatureId(key)])
+      .filter(([, , , featureId]) => this.createdFeatures.has(featureId));
+    const guards = this.unit().guards;
+    let devices;
+    if (todo.some(([key]) => !this.guards.has(key) && !Object.hasOwn(guards, key))) {
+      const read = await within(
+        Promise.resolve()
+          .then(() => this.gladys.getDevices())
+          .then(
+            (list) => ({ list }),
+            (err) => ({ err }),
+          ),
+        TIMINGS.dataTimeout,
+        this.timers,
+        TIMEOUT,
+      );
+      if (read === TIMEOUT || read.err || !Array.isArray(read.list)) {
+        this.logger.warn('Reading the devices from Gladys failed: the counters wait');
+        this.lastIndexAt = undefined;
+        return;
+      }
+      if (generation !== this.generation || serial !== this.memory.serial) return;
+      devices = read.list;
+    }
+    for (const [key, value, limits, featureId] of todo) {
+      const guard = this.guardOf(key, featureId, limits, devices);
       const wasHeld = guard.held;
       const plausible = guard.accept(value, this.sessionNow());
       if (!plausible && guard.held && guard.held !== wasHeld && !wasHeld) {
@@ -873,6 +1046,9 @@ export class GreenEyeApp {
           `GEM counter ${key} ${guard.held.direction === 'down' ? 'drop' : 'jump'} held back`,
         );
       }
+      // A counter at 0 or below (abs − pol of a NET channel) is never published: said.
+      if (value <= 0) this.nonPositive.add(key);
+      else this.nonPositive.delete(key);
       // While a value is held, the last accepted one is sent again (no delta for the core).
       const state = plausible ? value : guard.held ? guard.last?.value : undefined;
       if (state !== undefined && state > 0) this.push(featureId, { state });
@@ -882,11 +1058,13 @@ export class GreenEyeApp {
 
   /** The guards into the memory, with their session dates. */
   keepGuards() {
+    if (this.memory.serial === undefined) return;
+    const guards = this.unit().guards;
     for (const [key, { guard }] of this.guards) {
       if (!GUARD_KEY.test(key)) continue;
       const state = guard.state();
       if (!state.last) continue;
-      this.memory.guards[key] = {
+      guards[key] = {
         last: { ...state.last },
         held: state.held ? { ...state.held } : null,
       };
@@ -902,14 +1080,21 @@ export class GreenEyeApp {
       this.heldEntries().map(([key, h]) => [key, h.direction, h.from, h.threshold]),
     );
     const mono = this.clock();
+    const nonPositive = [...this.nonPositive].sort().join(',');
+    if (nonPositive !== this.savedNonPositive) {
+      this.savedNonPositive = nonPositive;
+      this.updateStatus();
+    }
     if (
       !this.guardAdded &&
+      !this.wrapped &&
       heldKey === this.savedHeld &&
       mono - this.lastGuardSave < TIMINGS.guardSaveEvery
     ) {
       return;
     }
     this.guardAdded = false;
+    this.wrapped = false;
     const statusChanged = heldKey !== this.savedHeld;
     this.savedHeld = heldKey;
     this.lastGuardSave = mono;

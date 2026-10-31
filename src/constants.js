@@ -70,9 +70,14 @@ export const TIMINGS = Object.freeze({
   valueMaxAge: MINUTE,
   /** The counters (indexes, pulses) are checked and published once a minute at most. */
   indexInterval: MINUTE,
+  /** "The GEM restarted" stays in the status this long. */
+  restartNotice: 10 * MINUTE,
   /** The power is computed over two packets at most this far apart (GEM seconds). */
   powerMaxGap: HOUR,
-  /** A packet repeating seconds this close below the last one is an old one (dropped). */
+  /**
+   * Seconds this close below the last packet: an old packet in the same
+   * connection (dropped), a restart of the GEM in a new one (taken).
+   */
   staleSeconds: 600,
   /** No packet for max(staleMin, 3 × the measured interval), capped at staleMax: stale. */
   staleMin: 2 * MINUTE,
